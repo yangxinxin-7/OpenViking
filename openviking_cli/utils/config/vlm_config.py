@@ -28,6 +28,10 @@ class VLMConfig(BaseModel):
 
     thinking: bool = Field(default=False, description="Enable thinking mode for VolcEngine models")
 
+    max_concurrent: int = Field(
+        default=100, description="Maximum number of concurrent LLM calls for semantic processing"
+    )
+
     _vlm_instance: Optional[Any] = None
 
     model_config = {"arbitrary_types_allowed": True, "extra": "forbid"}

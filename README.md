@@ -223,13 +223,15 @@ Create a configuration file `~/.openviking/ov.conf`, remove the comments before 
       "provider" : "<provider-type>",  // Provider type: "volcengine" or "openai" (currently supported)
       "dimension": 1024,               // Vector dimension
       "model"    : "<model-name>"      // Embedding model name (e.g., doubao-embedding-vision-250615 or text-embedding-3-large)
-    }
+    },
+    "max_concurrent": 10               // Max concurrent embedding requests (default: 10)
   },
   "vlm": {
     "api_base" : "<api-endpoint>",     // API endpoint address
     "api_key"  : "<your-api-key>",     // Model service API Key
     "provider" : "<provider-type>",    // Provider type (volcengine, openai, deepseek, anthropic, etc.)
-    "model"    : "<model-name>"        // VLM model name (e.g., doubao-seed-1-8-251228 or gpt-4-vision-preview)
+    "model"    : "<model-name>",       // VLM model name (e.g., doubao-seed-1-8-251228 or gpt-4-vision-preview)
+    "max_concurrent": 100              // Max concurrent LLM calls for semantic processing (default: 100)
   }
 }
 ```
@@ -259,13 +261,15 @@ Create a configuration file `~/.openviking/ov.conf`, remove the comments before 
       "provider" : "volcengine",
       "dimension": 1024,
       "model"    : "doubao-embedding-vision-250615"
-    }
+    },
+    "max_concurrent": 10
   },
   "vlm": {
     "api_base" : "https://ark.cn-beijing.volces.com/api/v3",
     "api_key"  : "your-volcengine-api-key",
     "provider" : "volcengine",
-    "model"    : "doubao-seed-1-8-251228"
+    "model"    : "doubao-seed-1-8-251228",
+    "max_concurrent": 100
   }
 }
 ```
@@ -291,13 +295,15 @@ Create a configuration file `~/.openviking/ov.conf`, remove the comments before 
       "provider" : "openai",
       "dimension": 3072,
       "model"    : "text-embedding-3-large"
-    }
+    },
+    "max_concurrent": 10
   },
   "vlm": {
     "api_base" : "https://api.openai.com/v1",
     "api_key"  : "your-openai-api-key",
     "provider" : "openai",
-    "model"    : "gpt-4-vision-preview"
+    "model"    : "gpt-4-vision-preview",
+    "max_concurrent": 100
   }
 }
 ```
