@@ -193,13 +193,15 @@ Get your API key at https://jina.ai
 
 #### Sparse Embedding
 
+> **Note:** Volcengine sparse embedding is supported starting from model `doubao-embedding-vision-250615` and only supports text input.
+
 ```json
 {
   "embedding": {
     "sparse": {
       "provider": "volcengine",
       "api_key": "your-api-key",
-      "model": "bm25-sparse-v1"
+      "model": "doubao-embedding-vision-250615"
     }
   }
 }
@@ -238,7 +240,7 @@ Two approaches are supported:
     "sparse": {
       "provider": "volcengine",
       "api_key": "your-api-key",
-      "model": "bm25-sparse-v1"
+      "model": "doubao-embedding-vision-250615"
     }
   }
 }

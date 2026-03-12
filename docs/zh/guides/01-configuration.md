@@ -199,13 +199,15 @@ OpenViking 使用 JSON 配置文件（`ov.conf`）进行设置。配置文件支
 
 #### Sparse Embedding
 
+> **注意：** 火山引擎的 Sparse embedding 从 `doubao-embedding-vision-250615` 模型版本起支持，且仅支持文本输入。
+
 ```json
 {
   "embedding": {
     "sparse": {
       "provider": "volcengine",
       "api_key": "your-api-key",
-      "model": "bm25-sparse-v1"
+      "model": "doubao-embedding-vision-250615"
     }
   }
 }
@@ -244,7 +246,7 @@ OpenViking 使用 JSON 配置文件（`ov.conf`）进行设置。配置文件支
     "sparse": {
       "provider": "volcengine",
       "api_key": "your-api-key",
-      "model": "bm25-sparse-v1"
+      "model": "doubao-embedding-vision-250615"
     }
   }
 }

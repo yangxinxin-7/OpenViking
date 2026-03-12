@@ -90,7 +90,10 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
             raise ValueError("api_key is required")
 
         # Initialize Volcengine client
-        self.client = volcenginesdkarkruntime.Ark(api_key=self.api_key, base_url=self.api_base)
+        ark_kwargs = {"api_key": self.api_key}
+        if self.api_base:
+            ark_kwargs["base_url"] = self.api_base
+        self.client = volcenginesdkarkruntime.Ark(**ark_kwargs)
 
         # Auto-detect dimension
         self._dimension = dimension
@@ -206,7 +209,10 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
         if not self.api_key:
             raise ValueError("api_key is required")
 
-        self.client = volcenginesdkarkruntime.Ark(api_key=self.api_key, base_url=self.api_base)
+        ark_kwargs = {"api_key": self.api_key}
+        if self.api_base:
+            ark_kwargs["base_url"] = self.api_base
+        self.client = volcenginesdkarkruntime.Ark(**ark_kwargs)
 
     def embed(self, text: str) -> EmbedResult:
         """Perform sparse embedding on text
@@ -227,7 +233,7 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
                 model=self.model_name,
                 sparse_embedding={"type": "enabled"},
             )
-            item = response.data[0]
+            item = response.data
             sparse_vector = getattr(item, "sparse_embedding", None)
             return EmbedResult(sparse_vector=process_sparse_embedding(sparse_vector))
         except Exception as e:
@@ -247,18 +253,7 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
         """
         if not texts:
             return []
-        try:
-            multimodal_inputs = [{"type": "text", "text": text} for text in texts]
-            response = self.client.multimodal_embeddings.create(
-                input=multimodal_inputs, model=self.model_name, sparse_embedding={"type": "enabled"}
-            )
-            results = []
-            for item in response.data:
-                sparse_vector = getattr(item, "sparse_embedding", None)
-                results.append(EmbedResult(sparse_vector=process_sparse_embedding(sparse_vector)))
-            return results
-        except Exception as e:
-            raise RuntimeError(f"Volcengine batch sparse embedding failed: {str(e)}") from e
+        return [self.embed(text) for text in texts]
 
 
 class VolcengineHybridEmbedder(HybridEmbedderBase):
@@ -299,7 +294,10 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
         if not self.api_key:
             raise ValueError("api_key is required")
 
-        self.client = volcenginesdkarkruntime.Ark(api_key=self.api_key, base_url=self.api_base)
+        ark_kwargs = {"api_key": self.api_key}
+        if self.api_base:
+            ark_kwargs["base_url"] = self.api_base
+        self.client = volcenginesdkarkruntime.Ark(**ark_kwargs)
         self._dimension = dimension or 2048
 
     def embed(self, text: str) -> EmbedResult:
@@ -346,24 +344,7 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
         """
         if not texts:
             return []
-        try:
-            multimodal_inputs = [{"type": "text", "text": text} for text in texts]
-            response = self.client.multimodal_embeddings.create(
-                input=multimodal_inputs, model=self.model_name, sparse_embedding={"type": "enabled"}
-            )
-            results = []
-            for item in response.data:
-                dense_vector = truncate_and_normalize(item.embedding, self.dimension)
-                sparse_vector = getattr(item, "sparse_embedding", None)
-                results.append(
-                    EmbedResult(
-                        dense_vector=dense_vector,
-                        sparse_vector=process_sparse_embedding(sparse_vector),
-                    )
-                )
-            return results
-        except Exception as e:
-            raise RuntimeError(f"Volcengine batch hybrid embedding failed: {str(e)}") from e
+        return [self.embed(text) for text in texts]
 
     def get_dimension(self) -> int:
         return self._dimension
