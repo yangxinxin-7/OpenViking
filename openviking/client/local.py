@@ -34,7 +34,7 @@ class LocalClient(BaseClient):
             user=UserIdentifier.the_default_user(),
         )
         self._user = self._service.user
-        self._ctx = RequestContext(user=self._user, role=Role.ROOT)
+        self._ctx = RequestContext(user=self._user, role=Role.USER)
 
     @property
     def service(self) -> OpenVikingService:
@@ -259,6 +259,8 @@ class LocalClient(BaseClient):
 
     async def create_session(self) -> Dict[str, Any]:
         """Create a new session."""
+        await self._service.initialize_user_directories(self._ctx)
+        await self._service.initialize_agent_directories(self._ctx)
         session = await self._service.sessions.create(self._ctx)
         return {
             "session_id": session.session_id,
