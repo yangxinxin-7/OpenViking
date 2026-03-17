@@ -54,6 +54,13 @@ template: |
   - Instruction-like user requests about assistant behavior (language/style/format/tooling) are extraction targets.
   - If such a request implies ongoing behavior, extract it as `preferences`; do not drop it as a mere command.
   - **Tool/Skill Call Records**: The conversation may contain `[ToolCall]` entries with tool/skill usage details. When present, extract relevant tool/skill memories.
+  - **User correction — mandatory behavioral memory**: If the conversation contains a user correction phrase such as "不对", "不是", "错了", "no,", "wrong", "incorrect", "actually", "that's not right", etc., you MUST extract at least one `cases` or `patterns` memory capturing the behavioral mistake and its root cause:
+    - Use `cases` when the failure is a specific one-time incident (e.g. cancelled the wrong order in this session)
+    - Use `patterns` when the failure reveals a reusable behavioral rule (e.g. always confirm which order to cancel when multiple exist)
+    - **Root cause over symptom**: identify WHY the agent made the wrong decision, not just THAT it was wrong.
+    - **Corrective rule if recoverable**: if the conversation shows successful correction, include it under `## Corrective Rule` in the content.
+    - **Honest if unrecoverable**: if the session ended without resolution, still extract the failure cause; omit `## Corrective Rule` rather than fabricating one.
+    - Note: `tool_status: error` alone does NOT require a `cases` memory — tool errors are already captured in `tools` memories via `common_failures`.
   - **Exhaustive extraction**: A single message may contain multiple independent facts.
     Extract EACH as a separate memory item. Do not merge unrelated facts into one summary.
     Count the distinct factual claims in each message and ensure each one is captured.
@@ -162,11 +169,22 @@ template: |
   - Note: Even if the problem seems minor or one-time, extract it if both the
     problem and its resolution/cause are stated. The specific details
     (error messages, parameter values, method names) are the most valuable part.
+  - **User-correction-triggered**: A user correction phrase is a strong signal to
+    create a `cases` memory (for a specific one-time incident) or a `patterns` memory
+    (if the correction reveals a reusable behavioral rule — see `patterns` below).
+    Capture the behavioral mistake and its root cause even if the session did not
+    fully recover. Structure the `content` with: `## Problem`, `## Root Cause`, and
+    optionally `## Corrective Rule` (only when a working fix is demonstrated).
+    Note: tool-level errors (`tool_status: error`) are handled by `tools` memories and
+    do NOT require a separate `cases` memory.
 
   **patterns** - Patterns (reusable processes)
   - Core: Describes "what process to follow in what situation"
   - Characteristics: Reusable across multiple scenarios
   - Test: Can it be used for "similar situations"
+  - **User-correction-triggered**: When a user correction reveals a recurring behavioral
+    mistake (e.g. "should always confirm before cancelling when multiple items exist"),
+    prefer `patterns` over `cases` — the lesson applies beyond this single session.
 
   **tools** - Tool usage memories (optimization insights)
   - Core: Describes "how to best use a specific tool"
@@ -319,6 +337,36 @@ template: |
     "content": "User feedback mentioned a band that the system could not recognize. Solution is to request user to provide more identification details: band member names, representative album names, music style, etc. This information can improve recognition accuracy."
   }
   ```
+
+  ✅ **Good (user-correction triggered, unrecoverable)**:
+  ```json
+  {
+    "category": "cases",
+    "abstract": "cancel_order executed on wrong order — agent did not confirm which order to cancel when multiple exist",
+    "overview": "## Problem\\nUser had two active orders; agent cancelled the first one without asking which to cancel\\n\\n## Root Cause\\nAgent assumed the first order in the list was the target when multiple orders were present",
+    "content": "## Problem\\nUser requested 'cancel my order'. Agent retrieved two active orders (ORD-999, ORD-888) and immediately cancelled the first one (ORD-999). User corrected: intended to cancel ORD-888.\\n\\n## Root Cause\\nAgent did not ask the user to specify which order when multiple active orders exist."
+  }
+  ```
+
+  ✅ **Good (user-correction triggered → patterns, behavioral rule)**:
+  ```json
+  {
+    "category": "patterns",
+    "abstract": "Multi-order cancellation: always confirm target order with user before cancelling",
+    "overview": "## Trigger Condition\\nUser requests order cancellation and multiple active orders exist\\n\\n## Process Flow\\n1. Retrieve all active orders\\n2. Present list to user and ask which to cancel\\n3. Execute cancellation only after explicit confirmation",
+    "content": "When a user requests order cancellation and there are multiple active orders, never cancel the first one automatically. Always present the list and ask the user to confirm the target order. Executing without confirmation risks cancelling the wrong order, which may be unrecoverable."
+  }
+  ```
+
+  ❌ **Bad (tool error incorrectly put in cases)**:
+  ```json
+  {
+    "category": "cases",
+    "abstract": "get_user_orders failed: user_id must be integer",
+    "content": "Tool returned error because user_id was a string..."
+  }
+  ```
+  Why bad: this is a tool-level parameter error, not a behavioral decision failure. It belongs in the `tools` memory under `common_failures`, not in `cases`.
 
   ## patterns Example (Merge type)
   ✅ **Good**:
