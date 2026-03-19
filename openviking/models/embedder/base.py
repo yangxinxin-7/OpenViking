@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
 import random
-import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -12,18 +12,23 @@ T = TypeVar("T")
 
 
 _tiktoken_encoder = None
+_tiktoken_lock = threading.Lock()
 
 
 def _get_tiktoken_encoder():
     """Get cached tiktoken encoder (module-level singleton, downloaded once)."""
     global _tiktoken_encoder
     if _tiktoken_encoder is None:
-        try:
-            import tiktoken
+        with _tiktoken_lock:
+            if _tiktoken_encoder is None:
+                try:
+                    import tiktoken
 
-            _tiktoken_encoder = tiktoken.get_encoding("cl100k_base")
-        except Exception:
-            pass
+                    _tiktoken_encoder = tiktoken.get_encoding("cl100k_base")
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        f"tiktoken unavailable, falling back to byte-based truncation: {e}"
+                    )
     return _tiktoken_encoder
 
 
@@ -62,7 +67,6 @@ def truncate_text_by_tokens(text: str, max_tokens: int) -> str:
     encoded = text.encode("utf-8")
     truncated = encoded[:max_tokens].decode("utf-8", errors="ignore")
     return truncated
-
 
 
 def truncate_and_normalize(embedding: List[float], dimension: Optional[int]) -> List[float]:
@@ -164,7 +168,7 @@ class EmbedderBase(ABC):
     def _truncate_input(self, text: str) -> str:
         """Truncate input text to max_input_tokens. Logs a warning if truncation occurs."""
         truncated = truncate_text_by_tokens(text, self.max_input_tokens)
-        if truncated != text:
+        if truncated is not text:
             logging.getLogger(__name__).warning(
                 f"[{self.__class__.__name__}] Input truncated to {self.max_input_tokens} tokens"
             )

@@ -124,7 +124,7 @@ class VikingDBDenseEmbedder(DenseEmbedderBase, VikingDBClientMixin):
 
     @property
     def max_input_tokens(self) -> int:
-        return self._get_max_input_tokens()
+        return self._max_input_tokens
 
     def __init__(
         self,
@@ -144,6 +144,7 @@ class VikingDBDenseEmbedder(DenseEmbedderBase, VikingDBClientMixin):
         self.dimension = dimension
         self.embedding_type = embedding_type
         self.dense_model = {"name": model_name, "version": model_version, "dim": dimension}
+        self._max_input_tokens = self._get_max_input_tokens()
 
     def embed(self, text: str, is_query: bool = False) -> EmbedResult:
         text = self._truncate_input(text)
@@ -181,7 +182,7 @@ class VikingDBSparseEmbedder(SparseEmbedderBase, VikingDBClientMixin):
 
     @property
     def max_input_tokens(self) -> int:
-        return self._get_max_input_tokens()
+        return self._max_input_tokens
 
     def __init__(
         self,
@@ -196,6 +197,7 @@ class VikingDBSparseEmbedder(SparseEmbedderBase, VikingDBClientMixin):
         SparseEmbedderBase.__init__(self, model_name, config)
         self._init_vikingdb_client(ak, sk, region, host)
         self.model_version = model_version
+        self._max_input_tokens = self._get_max_input_tokens()
         self.sparse_model = {
             "name": model_name,
             "version": model_version,
@@ -232,7 +234,7 @@ class VikingDBHybridEmbedder(HybridEmbedderBase, VikingDBClientMixin):
 
     @property
     def max_input_tokens(self) -> int:
-        return self._get_max_input_tokens()
+        return self._max_input_tokens
 
     def __init__(
         self,
@@ -251,6 +253,7 @@ class VikingDBHybridEmbedder(HybridEmbedderBase, VikingDBClientMixin):
         self.model_version = model_version
         self.dimension = dimension
         self.embedding_type = embedding_type
+        self._max_input_tokens = self._get_max_input_tokens()
         self.dense_model = {"name": model_name, "version": model_version, "dim": dimension}
         self.sparse_model = {
             "name": model_name,
