@@ -264,6 +264,7 @@ class SemanticProcessor(DequeueHandlerBase):
                         semantic_msg_id=msg.id,
                         recursive=msg.recursive,
                         lifecycle_lock_handle_id=msg.lifecycle_lock_handle_id,
+                        is_code_repo=msg.is_code_repo,
                     )
                     self._dag_executor = executor
                     await executor.run(msg.uri)

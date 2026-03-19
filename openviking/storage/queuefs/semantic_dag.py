@@ -77,6 +77,7 @@ class SemanticDagExecutor:
         semantic_msg_id: Optional[str] = None,
         recursive: bool = True,
         lifecycle_lock_handle_id: str = "",
+        is_code_repo: bool = False,
     ):
         self._processor = processor
         self._context_type = context_type
@@ -87,6 +88,7 @@ class SemanticDagExecutor:
         self._semantic_msg_id = semantic_msg_id
         self._recursive = recursive
         self._lifecycle_lock_handle_id = lifecycle_lock_handle_id
+        self._is_code_repo = is_code_repo
         self._llm_sem = asyncio.Semaphore(max_concurrent_llm)
         self._viking_fs = get_viking_fs()
         self._nodes: Dict[str, DirNode] = {}
@@ -434,7 +436,7 @@ class SemanticDagExecutor:
 
         try:
             if need_vectorize:
-                use_summary = bool(summary_dict.get("summary"))
+                use_summary = self._is_code_repo and bool(summary_dict.get("summary"))
                 task = VectorizeTask(
                     task_type="file",
                     uri=file_path,
