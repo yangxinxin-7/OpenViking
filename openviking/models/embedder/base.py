@@ -13,10 +13,15 @@ T = TypeVar("T")
 
 _tiktoken_encoder = None
 _tiktoken_lock = threading.Lock()
+_TIKTOKEN_NOT_AVAILABLE = object()  # sentinel: initialization was attempted but failed
 
 
 def _get_tiktoken_encoder():
-    """Get cached tiktoken encoder (module-level singleton, downloaded once)."""
+    """Get cached tiktoken encoder (module-level singleton, downloaded once).
+
+    Returns None if tiktoken is unavailable. The unavailable state is cached so
+    that import is only attempted once and the warning is only logged once.
+    """
     global _tiktoken_encoder
     if _tiktoken_encoder is None:
         with _tiktoken_lock:
@@ -29,7 +34,8 @@ def _get_tiktoken_encoder():
                     logging.getLogger(__name__).warning(
                         f"tiktoken unavailable, falling back to byte-based truncation: {e}"
                     )
-    return _tiktoken_encoder
+                    _tiktoken_encoder = _TIKTOKEN_NOT_AVAILABLE
+    return None if _tiktoken_encoder is _TIKTOKEN_NOT_AVAILABLE else _tiktoken_encoder
 
 
 def truncate_text_by_tokens(text: str, max_tokens: int) -> str:
@@ -168,7 +174,7 @@ class EmbedderBase(ABC):
     def _truncate_input(self, text: str) -> str:
         """Truncate input text to max_input_tokens. Logs a warning if truncation occurs."""
         truncated = truncate_text_by_tokens(text, self.max_input_tokens)
-        if truncated is not text:
+        if len(truncated) < len(text):
             logging.getLogger(__name__).warning(
                 f"[{self.__class__.__name__}] Input truncated to {self.max_input_tokens} tokens"
             )
