@@ -11,6 +11,7 @@ include README.md
 include pyproject.toml
 include setup.py
 recursive-include openviking *.yaml
+recursive-include openviking *.md
 
 # sdist should be source-only: never ship runtime binaries from working tree
 prune openviking/bin

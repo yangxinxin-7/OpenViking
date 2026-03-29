@@ -1,0 +1,55 @@
+memory_type: cases
+description: |
+  Experience memory - knowledge accumulated around a topic or domain encountered in conversations.
+  Each experience covers a broad topic (e.g. "asyncio task cancellation", "Git rebase workflow"),
+  not a single narrow problem. Related techniques, edge cases, and complementary patterns on the
+  same topic should all be consolidated into one experience rather than split into separate ones.
+  Experiences grow richer over time as new conversations add depth to the same topic.
+directory: "viking://agent/{agent_space}/memories/cases"
+filename_template: "{memory_id}.md"
+enabled: true
+fields:
+  - name: memory_id
+    type: string
+    description: |
+      System-generated stable identifier for this experience. Used for the filename and
+      should never be changed by the model.
+    merge_op: immutable
+
+  - name: title
+    type: string
+    description: |
+      Human-readable topic name for this experience. Use a concise domain label, not a
+      problem→solution pair. Example: "asyncio task cancellation", "Python packaging with uv",
+      "Git interactive rebase".
+    merge_op: immutable
+
+  - name: situation
+    type: string
+    description: |
+      Describe the broader context or scenarios where this topic comes up.
+      Should cover the full range of cases accumulated so far, not just the latest one.
+      No specific user names, IDs, or one-off values.
+      Example: "Writing asyncio programs that cancel tasks holding I/O resources, or that need
+      robust cleanup logic even under cancellation"
+    merge_op: patch
+
+  - name: lesson
+    type: string
+    description: |
+      All actionable rules, techniques, and insights accumulated for this topic.
+      Add new knowledge alongside existing knowledge — do not replace; enrich.
+      Write each point on its own line (use \n between items, not semicolons).
+      Example:
+      "1. Use async with / try-finally to ensure cleanup on cancellation.
+      2. asyncio.shield() protects critical cleanup sections.
+      3. task.cancel() returns False if the task is already done."
+    merge_op: patch
+
+  - name: pitfall
+    type: string
+    description: |
+      Negative reminders and anti-patterns for this topic.
+      Write each point on its own line (use \n between items, not semicolons).
+      Format each item as: "Do not [wrong behavior] — instead [correct approach]".
+    merge_op: patch

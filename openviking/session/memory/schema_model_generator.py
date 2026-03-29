@@ -63,7 +63,7 @@ class SchemaModelGenerator:
         The model includes:
         - memory_type (literal discriminator)
         - All business fields (with Union[base_type, patch_type] for mutable fields)
-        - Standard metadata fields (uri, name, abstract, overview, content, tags, created_at, updated_at)
+        - Optional uri for targeting existing files during edit operations
 
         Args:
             memory_type: The memory type schema
@@ -85,6 +85,15 @@ class SchemaModelGenerator:
         field_definitions["memory_type"] = (
             Literal[memory_type.memory_type],  # type: ignore
             Field(..., description=f"Memory type: {memory_type.memory_type}"),
+        )
+
+        field_definitions["uri"] = (
+            Optional[str],
+            Field(None, description="Explicit target URI for edit operations"),
+        )
+        field_definitions["content"] = (
+            Optional[Union[str, StrPatch]],
+            Field(None, description="Main body content for the memory file"),
         )
 
         # Add business fields from schema

@@ -212,6 +212,11 @@ class MemoryUpdater:
         # Collect metadata - only include business fields (from schema, except content)
         metadata = business_fields.copy()
 
+        # If content is empty, auto-render from schema fields so the file
+        # has readable main-body text for embedding and abstract generation.
+        if not content and field_schema_map and business_fields:
+            content = self._render_body(field_schema_map, business_fields)
+
         # Serialize content with metadata
         full_content = serialize_with_metadata(content, metadata)
 
@@ -250,34 +255,33 @@ class MemoryUpdater:
         new_plain_content = current_plain_content
         metadata = current_metadata or {}
 
+        if "content" in model_dict:
+            content_value = model_dict["content"]
+            if isinstance(content_value, str):
+                new_plain_content = content_value
+            else:
+                patch_op = PatchOp(FieldType.STRING)
+                if isinstance(content_value, dict):
+                    if "blocks" in content_value:
+                        blocks = [SearchReplaceBlock(**block) for block in content_value["blocks"]]
+                        content_value = StrPatch(blocks=blocks)
+                new_plain_content = patch_op.apply(current_plain_content, content_value)
+
         # Handle schema-defined fields first
         for field_name, field_schema in field_schema_map.items():
             if field_name in model_dict:
                 patch_value = model_dict[field_name]
-
-                # Get current value
-                if field_name == "content":
-                    current_value = current_plain_content
-                else:
-                    current_value = metadata.get(field_name)
+                current_value = metadata.get(field_name)
 
                 # Create MergeOp and apply
                 merge_op = MergeOpFactory.from_field(field_schema)
                 new_value = merge_op.apply(current_value, patch_value)
+                metadata[field_name] = new_value
 
-                # Update the field
-                if field_name == "content":
-                    new_plain_content = new_value
-                else:
-                    metadata[field_name] = new_value
-
-        # Special case: handle content field even without schema (for backward compatibility/testing)
-        if "content" in model_dict and "content" not in field_schema_map:
-            from openviking.session.memory.merge_op import PatchOp
-            from openviking.session.memory.merge_op.base import FieldType
-            patch_value = model_dict["content"]
-            merge_op = PatchOp(FieldType.STRING)
-            new_plain_content = merge_op.apply(current_plain_content, patch_value)
+        # If main content is still empty after edits, auto-render from non-immutable
+        # schema fields so the file has embeddable text.
+        if not new_plain_content and field_schema_map and metadata:
+            new_plain_content = self._render_body(field_schema_map, metadata)
 
         # Re-serialize with updated content and metadata
         new_full_content = serialize_with_metadata(new_plain_content, metadata)
@@ -405,6 +409,23 @@ class MemoryUpdater:
             logger.debug(f"Wrote abstract: {abstract_uri}")
         except Exception as e:
             logger.warning(f"Failed to write abstract {abstract_uri}: {e}")
+
+    @staticmethod
+    def _render_body(field_schema_map: Dict[str, "MemoryField"], fields: Dict[str, Any]) -> str:
+        """Render main-body text from schema fields."""
+        parts = []
+        title = fields.get("title") or ""
+        if title:
+            parts.append(str(title))
+        for field_name, field_schema in field_schema_map.items():
+            if field_name == "title":
+                continue
+            from openviking.session.memory.merge_op.base import MergeOp as MergeOpEnum
+            if field_schema.merge_op != MergeOpEnum.IMMUTABLE and field_name in fields:
+                value = fields.get(field_name) or ""
+                if value:
+                    parts.append(str(value))
+        return "\n\n".join(parts)
 
     def _print_diff(self, uri: str, old_content: str, new_content: str) -> None:
         """Print a diff of the memory edit using diff_match_patch."""

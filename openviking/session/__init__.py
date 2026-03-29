@@ -41,11 +41,11 @@ def create_session_compressor(
 
     Args:
         vikingdb: VikingDBManager instance
-        memory_version: Optional memory version override ("v1" or "v2").
+        memory_version: Optional memory version override ("v1", "v2", or "v3").
             If not provided, uses the version from config.
 
     Returns:
-        SessionCompressor instance (v1 or v2 implementation)
+        SessionCompressor instance (v1, v2, or v3 implementation)
     """
     # Determine which version to use
     if memory_version is None:
@@ -55,6 +55,15 @@ def create_session_compressor(
         except Exception as e:
             logger.warning(f"Failed to get memory version from config, defaulting to v1: {e}")
             memory_version = "v1"
+
+    if memory_version == "v3":
+        logger.info("Using v3 memory compressor (two-stage case extraction)")
+        try:
+            from openviking.session.compressor_v3 import SessionCompressorV3
+            return SessionCompressorV3(vikingdb=vikingdb)
+        except Exception as e:
+            logger.warning(f"Failed to load v3 compressor, falling back to v1: {e}")
+            return SessionCompressor(vikingdb=vikingdb)
 
     if memory_version == "v2":
         logger.info("Using v2 memory compressor (templating system)")
