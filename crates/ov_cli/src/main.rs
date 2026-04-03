@@ -6,7 +6,7 @@ mod output;
 mod tui;
 mod utils;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use config::Config;
 use error::{Error, Result};
 use output::OutputFormat;
@@ -128,9 +128,9 @@ enum Commands {
         /// Wait timeout in seconds (only used with --wait)
         #[arg(long)]
         timeout: Option<f64>,
-        /// No strict mode for directory scanning
-        #[arg(long = "no-strict", default_value_t = false)]
-        no_strict: bool,
+        /// Enable strict mode for directory scanning (fail if any unsupported files found)
+        #[arg(long = "strict", action = ArgAction::SetTrue)]
+        strict_mode: bool,
         /// Ignore directories, e.g. --ignore-dirs "node_modules,dist"
         #[arg(long)]
         ignore_dirs: Option<String>,
@@ -657,7 +657,7 @@ async fn main() {
             instruction,
             wait,
             timeout,
-            no_strict,
+            strict_mode,
             ignore_dirs,
             include,
             exclude,
@@ -672,7 +672,7 @@ async fn main() {
                 instruction,
                 wait,
                 timeout,
-                no_strict,
+                strict_mode,
                 ignore_dirs,
                 include,
                 exclude,
@@ -827,7 +827,7 @@ async fn handle_add_resource(
     instruction: String,
     wait: bool,
     timeout: Option<f64>,
-    no_strict: bool,
+    strict_mode: bool,
     ignore_dirs: Option<String>,
     include: Option<String>,
     exclude: Option<String>,
@@ -875,7 +875,7 @@ async fn handle_add_resource(
         std::process::exit(1);
     }
 
-    let strict = !no_strict;
+    let strict = strict_mode;
     let directly_upload_media = !no_directly_upload_media;
 
     let effective_timeout = if wait {

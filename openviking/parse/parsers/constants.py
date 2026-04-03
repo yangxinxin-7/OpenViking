@@ -95,6 +95,7 @@ IGNORE_EXTENSIONS = {
 # Code file extensions for file type detection
 CODE_EXTENSIONS = {
     ".py",
+    ".pyi",
     ".java",
     ".cpp",
     ".cc",
@@ -226,6 +227,8 @@ ADDITIONAL_TEXT_EXTENSIONS = {
     ".yarnrc",
     ".env",
     ".env.example",
+    ".lock",
+    ".in",
 }
 
 # Common text encodings to try for encoding detection (in order of likelihood)

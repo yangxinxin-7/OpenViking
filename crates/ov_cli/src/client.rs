@@ -563,11 +563,16 @@ impl HttpClient {
 
         if path_obj.exists() {
             if path_obj.is_dir() {
+                let source_name = path_obj
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
                 let zip_file = self.zip_directory(path_obj)?;
                 let temp_file_id = self.upload_temp_file(zip_file.path()).await?;
 
                 let body = serde_json::json!({
                     "temp_file_id": temp_file_id,
+                    "source_name": source_name,
                     "to": to,
                     "parent": parent,
                     "reason": reason,
