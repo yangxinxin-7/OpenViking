@@ -1,0 +1,62 @@
+memory_type: experience
+description: |
+  Agent experience memory - reusable insight distilled from one or more trajectories.
+  An experience captures when a pattern applies and the key lesson or pitfall to remember.
+
+  # How it is updated
+  You will be given:
+    1. A new trajectory summary from the current conversation.
+    2. A handful of candidate existing experiences.
+    3. Historical source trajectories for a chosen experience only when needed.
+
+  Your job:
+    - If the new trajectory meaningfully extends or reinforces an existing experience -> EDIT it.
+    - If it is a genuinely new reusable pattern -> WRITE a new experience.
+    - If it is too narrow, one-off, or already fully covered -> do nothing.
+
+directory: "viking://agent/{{ agent_space }}/memories/experiences"
+filename_template: "{{ experience_name }}.md"
+enabled: true
+operation_mode: "upsert"
+
+fields:
+  - name: experience_name
+    type: string
+    description: |
+      Lowercase snake_case only, ASCII letters only, max 5 words.
+      Use a broad, reusable, domain-agnostic name when possible.
+      Do not use Chinese.
+      Good: "booking_duplicate_handling", "pytest_asyncio_cancel_hang_fix".
+    merge_op: immutable
+
+  - name: situation
+    type: string
+    description: |
+      Markdown bullets describing when this experience applies.
+      Rules:
+      - Use concise markdown bullets.
+      - No headings.
+      - No numbered lists.
+      - Keep each bullet short.
+    merge_op: patch
+
+  - name: lesson_or_pitfall
+    type: string
+    description: |
+      Markdown bullets with the key reusable guidance to remember.
+      This may include what works, what to avoid, or both.
+      Rules:
+      - Use concise markdown bullets.
+      - No headings.
+      - No numbered lists.
+      - Keep each bullet short.
+    merge_op: patch
+
+  - name: source_trajectories
+    type: string
+    description: |
+      System-managed field.
+      Newline-separated trajectory URIs that this experience was distilled from.
+      The pipeline appends and maintains this field automatically.
+      Do not generate or modify this field in LLM output.
+    merge_op: patch

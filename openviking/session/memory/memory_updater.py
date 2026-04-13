@@ -73,6 +73,26 @@ class ExtractContext:
         first_time = msg_range._first_message_time()
         return first_time.split("-")[2] if first_time else None
 
+    def get_timestamp_from_ranges(self, ranges_str: str) -> str:
+        """根据 ranges 获取第一条消息的紧凑时间戳（YYYYMMDDHHMMSS），用于文件名去重。
+
+        Fallback 到 datetime.now() 以保证总是返回非空字符串。
+        """
+        from datetime import datetime
+
+        msg_range = self.read_message_ranges(ranges_str) if ranges_str else None
+        if msg_range:
+            for elem in msg_range.elements:
+                if isinstance(elem, str):
+                    continue
+                created_at = getattr(elem, "created_at", None)
+                if created_at:
+                    try:
+                        return datetime.fromisoformat(created_at).strftime("%Y%m%d%H%M%S")
+                    except (ValueError, TypeError):
+                        continue
+        return datetime.now().strftime("%Y%m%d%H%M%S")
+
     def read_message_ranges(self, ranges_str: str) -> "MessageRange":
         """Parse ranges string like "0-10,50-60" or "7,9,11,13" and return combined MessageRange.
 
@@ -289,8 +309,19 @@ class MemoryUpdater:
             return result
 
         # Apply unified operations - _apply_edit returns True if edited, False if written
+        seen_trajectory_names = set()
         for resolved_op in resolved_ops.operations:
             try:
+                if resolved_op.memory_type == "trajectory":
+                    model_dict = flat_model_to_dict(resolved_op.model)
+                    trajectory_name = (model_dict.get("trajectory_name") or "").strip()
+                    if trajectory_name:
+                        normalized_name = trajectory_name.lower()
+                        if normalized_name in seen_trajectory_names:
+                            tracer.info(f"Skip duplicate trajectory in same batch: {trajectory_name}")
+                            continue
+                        seen_trajectory_names.add(normalized_name)
+
                 is_edited = await self._apply_edit(
                     resolved_op.model,
                     resolved_op.uri,
@@ -375,21 +406,30 @@ class MemoryUpdater:
             if schema:
                 field_schema_map = {f.name: f for f in schema.fields}
 
-        # Build metadata by applying merge_op to each field
-        # (merge_op.apply handles current_value=None case for new files)
-        metadata: Dict[str, Any] = {}
+        # Build new metadata by applying merge_op to each field.
+        # Use current_metadata (from the existing file) as the base for current values.
+        existing_metadata = current_metadata or {}
+        new_metadata: Dict[str, Any] = {}
         for field_name, field_schema in field_schema_map.items():
             if field_name in model_dict:
                 patch_value = model_dict[field_name]
-                # Get current value
+                # Get current value from the existing file's metadata
                 if field_name == "content":
                     current_value = current_plain_content
                 else:
-                    current_value = metadata.get(field_name)
+                    current_value = existing_metadata.get(field_name)
                 # Use merge_op to process field value
                 merge_op = MergeOpFactory.from_field(field_schema)
                 new_value = merge_op.apply(current_value, patch_value)
-                metadata[field_name] = new_value
+                new_metadata[field_name] = new_value
+
+        # Pass through system-managed fields that are in the existing file but not
+        # in the LLM schema (e.g. source_trajectories managed by the pipeline).
+        for key, value in existing_metadata.items():
+            if key not in new_metadata and key not in field_schema_map:
+                new_metadata[key] = value
+
+        metadata = new_metadata
 
         # Serialize and write (template rendering is handled inside serialize_with_metadata)
         content_template = None
@@ -407,6 +447,12 @@ class MemoryUpdater:
 
         if file_existed:
             self._print_diff(uri, current_plain_content, new_full_content)
+            # Delete before rewriting to prevent stale tail bytes when new
+            # content is shorter than old content (AGFS write doesn't truncate).
+            try:
+                await viking_fs.rm(uri, ctx=ctx)
+            except Exception:
+                pass
 
         await viking_fs.write_file(uri, new_full_content, ctx=ctx)
         return file_existed
