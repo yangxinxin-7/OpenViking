@@ -29,6 +29,8 @@ import os
 import re
 import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
@@ -101,10 +103,29 @@ def parse_session_range(s: str) -> tuple[int, int]:
     return n, n
 
 
-def format_date_time(date_time: str) -> str:
-    """Format a LoCoMo date_time string into a human-readable date."""
-    # date_time is typically like "Tuesday, November 14, 2023"
-    return date_time
+def parse_locomo_date(date_time: str) -> Optional[str]:
+    """Parse a LoCoMo date_time string to ISO 8601 format.
+    e.g. '1:56 pm on 8 May, 2023' -> '2023-05-08T13:56:00.000Z'
+    """
+    import re
+    from datetime import datetime, timezone
+    match = re.search(r"(\d+):(\d+)\s*(am|pm)\s*on\s*(\d+)\s*(\w+),?\s*(\d+)", date_time, re.IGNORECASE)
+    if not match:
+        return None
+    hour_str, minute, ampm, day, month_name, year = match.groups()
+    hour = int(hour_str)
+    if ampm.lower() == "pm" and hour != 12:
+        hour += 12
+    if ampm.lower() == "am" and hour == 12:
+        hour = 0
+    month_names = ["january","february","march","april","may","june",
+                   "july","august","september","october","november","december"]
+    try:
+        month = next(i + 1 for i, n in enumerate(month_names) if n.startswith(month_name.lower()))
+        dt = datetime(int(year), month, int(day), hour, int(minute), tzinfo=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    except (StopIteration, ValueError):
+        return None
 
 
 def build_session_content(
@@ -112,25 +133,10 @@ def build_session_content(
     session_key: str,
     date_time: str,
 ) -> str:
-    """
-    Build the content string for a session, matching memorybench supermemory format:
-        "Here is the date the following session took place: {date}\n\n
-         Here is the session as a stringified JSON:\n{json_string}"
-    """
     conv = item["conversation"]
     raw_messages = conv[session_key]
-    speaker_a = conv["speaker_a"]
-    speaker_b = conv["speaker_b"]
-
-    # Build messages list in the same format as memorybench UnifiedSession
-    messages = []
-    for msg in raw_messages:
-        speaker = msg.get("speaker", "")
-        text = msg.get("text", "")
-        role = "user" if speaker == speaker_a else "assistant"
-        messages.append({"role": role, "content": f"[{speaker}]: {text}"})
-
-    session_str = json.dumps(messages, ensure_ascii=False).replace("<", "&lt;").replace(">", "&gt;")
+    lines = [f"[{msg.get('speaker', '').capitalize()}]: {msg.get('text', '')}" for msg in raw_messages]
+    session_str = "\n".join(lines)
 
     if date_time:
         return (
@@ -173,6 +179,7 @@ def build_sessions(
 
         dt_key = f"{sk}_date_time"
         date_time = conv.get(dt_key, "")
+        date_iso = parse_locomo_date(date_time) if date_time else None
 
         content = build_session_content(item, sk, date_time)
 
@@ -183,6 +190,7 @@ def build_sessions(
                     "sample_id": item["sample_id"],
                     "session_key": sk,
                     "date_time": date_time,
+                    "date_iso": date_iso or "",
                     "speaker_a": conv["speaker_a"],
                     "speaker_b": conv["speaker_b"],
                 },
@@ -244,8 +252,8 @@ def write_error_log(path: str, sample_id: str, session_key: str, error: str) -> 
 
 def poll_document(client: Supermemory, doc_id: str, timeout_sec: int = 600) -> str:
     """
-    Poll a supermemory document until both doc and memory are done or failed.
-    Returns final status: "done", "failed", or "TIMEOUT".
+    Poll a single document until done/failed/TIMEOUT.
+    Returns final status string.
     """
     backoff = 1.0
     start = time.time()
@@ -260,17 +268,8 @@ def poll_document(client: Supermemory, doc_id: str, timeout_sec: int = 600) -> s
 
             if doc_status == "failed":
                 return "failed"
-
             if doc_status == "done":
-                try:
-                    mem = client.memories.get(doc_id)
-                    mem_status = getattr(mem, "status", None) or (mem.get("status") if isinstance(mem, dict) else None)
-                    if mem_status == "done":
-                        return "done"
-                    elif mem_status == "failed":
-                        return "failed"
-                except Exception:
-                    pass
+                return "done"
 
         except Exception as e:
             print(f"    [poll] Error checking doc {doc_id}: {e}", file=sys.stderr)
@@ -279,42 +278,134 @@ def poll_document(client: Supermemory, doc_id: str, timeout_sec: int = 600) -> s
         backoff = min(backoff * 1.2, 5.0)
 
 
+def poll_all_documents(
+    client: Supermemory,
+    pending: dict[str, dict],  # doc_id -> {"session_key", "label", ...}
+    timeout_sec: int = 600,
+    threads: int = 8,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    Poll all pending doc_ids in parallel.
+    Returns (done_map, failed_map): doc_id -> label.
+    """
+    done_map: dict[str, str] = {}
+    failed_map: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = {
+            executor.submit(poll_document, client, doc_id, timeout_sec): doc_id
+            for doc_id in pending
+        }
+        for fut in as_completed(futures):
+            doc_id = futures[fut]
+            label = pending[doc_id]["label"]
+            try:
+                status = fut.result()
+            except Exception as e:
+                status = f"ERROR: {e}"
+            if status == "done":
+                done_map[doc_id] = label
+                print(f"  [{label}] indexed OK  doc_id={doc_id}", file=sys.stderr)
+            else:
+                failed_map[doc_id] = label
+                print(f"  [{label}] indexing {status}  doc_id={doc_id}", file=sys.stderr)
+
+    return done_map, failed_map
+
+
 # ---------------------------------------------------------------------------
 # Core ingest logic
 # ---------------------------------------------------------------------------
 
-def ingest_session(
+def upload_session(
     client: Supermemory,
     content: str,
     container_tag: str,
     meta: dict,
-    wait_for_indexing: bool = True,
 ) -> str:
-    """
-    Add one session's content to Supermemory.
-    Returns doc_id.
-    """
+    """Upload one session to Supermemory (no indexing wait). Returns doc_id."""
     response = client.add(
         content=content,
         container_tag=container_tag,
         metadata={
             "session_key": meta.get("session_key", ""),
             "date_time": meta.get("date_time", ""),
+            "date": meta.get("date_iso", ""),
             "speaker_a": meta.get("speaker_a", ""),
             "speaker_b": meta.get("speaker_b", ""),
         },
     )
-
     doc_id = getattr(response, "id", None) or (response.get("id") if isinstance(response, dict) else None)
     if not doc_id:
         raise RuntimeError(f"Supermemory add() returned no id: {response}")
-
-    if wait_for_indexing:
-        final_status = poll_document(client, doc_id)
-        if final_status != "done":
-            raise RuntimeError(f"Document {doc_id} indexing ended with status: {final_status}")
-
     return doc_id
+
+
+def ingest_sample(
+    item: dict,
+    client: Supermemory,
+    ingest_record: dict,
+    record_lock: threading.Lock,
+    args: argparse.Namespace,
+    session_range: Optional[tuple[int, int]],
+) -> tuple[int, int, int, int]:
+    """Ingest one sample. Returns (total, success, skip, error) counts."""
+    sample_id: str = item["sample_id"]
+    container_tag = sanitize_tag(sample_id)
+    sessions = build_sessions(item, session_range)
+    print(f"\n=== Sample {sample_id} ({len(sessions)} sessions) [containerTag={container_tag}] ===", file=sys.stderr)
+
+    total = len(sessions)
+    success = skip = error = 0
+
+    # Phase 1: upload all sessions serially (within this sample)
+    to_poll: dict[str, dict] = {}
+
+    for sess in sessions:
+        meta = sess["meta"]
+        session_key = meta["session_key"]
+        label = f"{session_key} ({meta['date_time']})"
+
+        with record_lock:
+            already = not args.force_ingest and is_already_ingested(sample_id, session_key, ingest_record)
+        if already:
+            print(f"  [{label}] SKIP (already ingested)", file=sys.stderr)
+            skip += 1
+            continue
+
+        try:
+            doc_id = upload_session(client, sess["content"], container_tag, meta)
+            print(f"  [{label}] uploaded  doc_id={doc_id}", file=sys.stderr)
+            to_poll[doc_id] = {"session_key": session_key, "label": label, "meta": meta}
+        except Exception as e:
+            print(f"  [{label}] UPLOAD ERROR: {e}", file=sys.stderr)
+            write_error_log(args.error_log, sample_id, session_key, str(e))
+            error += 1
+
+    if not to_poll:
+        return total, success, skip, error
+
+    # Phase 2: poll all uploaded docs in parallel until all done
+    print(f"  [INFO] Polling {len(to_poll)} docs for indexing completion...", file=sys.stderr)
+    t0 = time.time()
+    done_map, failed_map = poll_all_documents(client, to_poll, threads=args.threads)
+    elapsed = time.time() - t0
+    print(f"  [INFO] Indexing done in {elapsed:.1f}s: {len(done_map)} OK, {len(failed_map)} failed", file=sys.stderr)
+
+    # Phase 3: save ingest records (thread-safe)
+    with record_lock:
+        for doc_id in done_map:
+            info = to_poll[doc_id]
+            mark_ingested(sample_id, info["session_key"], ingest_record, doc_id, info["meta"])
+            success += 1
+        save_ingest_record(ingest_record, args.record)
+
+    for doc_id in failed_map:
+        info = to_poll[doc_id]
+        write_error_log(args.error_log, sample_id, info["session_key"], f"indexing failed/timeout for doc {doc_id}")
+        error += 1
+
+    return total, success, skip, error
 
 
 def run_ingest(args: argparse.Namespace) -> None:
@@ -337,50 +428,28 @@ def run_ingest(args: argparse.Namespace) -> None:
     samples = load_locomo_data(args.input, args.sample)
     if args.limit:
         samples = samples[: args.limit]
-    print(f"[INFO] Loaded {len(samples)} sample(s)", file=sys.stderr)
+    print(f"[INFO] Loaded {len(samples)} sample(s) (sample_concurrency={args.sample_concurrency})", file=sys.stderr)
 
-    total_sessions = 0
-    success_count = 0
-    skip_count = 0
-    error_count = 0
+    total_sessions = success_count = skip_count = error_count = 0
+    record_lock = threading.Lock()
 
-    for item in samples:
-        sample_id: str = item["sample_id"]
-        container_tag = sanitize_tag(sample_id)
-        sessions = build_sessions(item, session_range)
-        print(f"\n=== Sample {sample_id} ({len(sessions)} sessions) [containerTag={container_tag}] ===", file=sys.stderr)
-
-        for sess in sessions:
-            meta = sess["meta"]
-            session_key = meta["session_key"]
-            label = f"{session_key} ({meta['date_time']})"
-            total_sessions += 1
-
-            if not args.force_ingest and is_already_ingested(sample_id, session_key, ingest_record):
-                print(f"  [{label}] SKIP (already ingested)", file=sys.stderr)
-                skip_count += 1
-                continue
-
-            print(f"  [{label}] ingesting ...", file=sys.stderr)
-            t0 = time.time()
-
+    with ThreadPoolExecutor(max_workers=args.sample_concurrency) as executor:
+        futures = {
+            executor.submit(
+                ingest_sample, item, client, ingest_record, record_lock, args, session_range
+            ): item["sample_id"]
+            for item in samples
+        }
+        for fut in as_completed(futures):
+            sample_id = futures[fut]
             try:
-                doc_id = ingest_session(
-                    client,
-                    sess["content"],
-                    container_tag,
-                    meta,
-                    wait_for_indexing=args.wait_indexing,
-                )
-                elapsed = time.time() - t0
-                mark_ingested(sample_id, session_key, ingest_record, doc_id, meta)
-                save_ingest_record(ingest_record, args.record)
-                print(f"  [{label}] OK  doc_id={doc_id}  {elapsed:.1f}s", file=sys.stderr)
-                success_count += 1
-            except Exception as e:
-                elapsed = time.time() - t0
-                print(f"  [{label}] ERROR: {e}  {elapsed:.1f}s", file=sys.stderr)
-                write_error_log(args.error_log, sample_id, session_key, str(e))
+                t, s, sk, e = fut.result()
+                total_sessions += t
+                success_count += s
+                skip_count += sk
+                error_count += e
+            except Exception as exc:
+                print(f"[ERROR] Sample {sample_id} failed: {exc}", file=sys.stderr)
                 error_count += 1
 
     print(f"\n=== Ingest summary ===", file=sys.stderr)
@@ -445,11 +514,16 @@ def main() -> None:
         help="Clear all existing ingest records before running",
     )
     parser.add_argument(
-        "--no-wait-indexing",
-        dest="wait_indexing",
-        action="store_false",
-        default=True,
-        help="Don't wait for Supermemory async indexing to complete (faster but no status check)",
+        "--threads",
+        type=int,
+        default=8,
+        help="Concurrent threads for indexing poll within a sample (default: 8)",
+    )
+    parser.add_argument(
+        "--sample-concurrency",
+        type=int,
+        default=3,
+        help="Number of samples to ingest concurrently (default: 3)",
     )
 
     args = parser.parse_args()

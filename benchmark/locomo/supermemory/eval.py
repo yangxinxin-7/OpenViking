@@ -124,7 +124,7 @@ def _restart_openclaw_gateway(base_url: str, startup_timeout: int = 30) -> None:
         raise RuntimeError(f"Failed to start openclaw gateway: {e}")
 
     # Wait for process to fully start
-    time.sleep(3)
+    time.sleep(5)
 
     # Wait until gateway is ready
     health_url = f"{base_url.rstrip('/')}/health"
@@ -352,6 +352,7 @@ def send_to_openclaw(
     base_url: str,
     token: str,
     question_id: Optional[str] = None,
+    question_time: Optional[str] = None,
     retries: int = 2,
 ) -> tuple[str, dict, float]:
     """
@@ -368,7 +369,9 @@ def send_to_openclaw(
     }
     payload = {
         "model": "openclaw",
-        "input": question,
+        # Force explicit search: the openclaw-supermemory plugin skips semantic search
+        # on the first turn of a session, so autoRecall alone is not enough here.
+        "input": f"Use supermemory_search to find relevant memories, then Answer the question directly: {question}",
         "stream": False,
         "user": sample_id,
     }
@@ -554,6 +557,7 @@ def run_qa(args: argparse.Namespace) -> None:
                     args.openclaw_url,
                     openclaw_token,
                     qa["question_id"],
+                    qa.get("question_time"),
                 )
             except Exception as e:
                 response = f"[ERROR] {e}"
