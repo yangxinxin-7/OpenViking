@@ -106,10 +106,8 @@ def clear_ingest_records(container_tag: str, record_path: str) -> int:
         return 0
 
     # Records are keyed as "supermemory:{sample_id}:{session_key}"
-    # container_tag may differ from sample_id due to sanitization, so match both
-    prefix_sanitized = f"supermemory:{container_tag}:"
-    # Also try matching the original (unsanitized) form by rebuilding from tag
-    keys_to_remove = [k for k in record if k.split(":")[1] if sanitize_tag(k.split(":")[1]) == container_tag]
+    # Match by sanitized sample_id to handle keys like "conv-26" vs "conv_26"
+    keys_to_remove = [k for k in record if len(k.split(":")) >= 2 and sanitize_tag(k.split(":")[1]) == container_tag]
 
     for k in keys_to_remove:
         del record[k]
