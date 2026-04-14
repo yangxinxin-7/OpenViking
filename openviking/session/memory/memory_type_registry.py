@@ -186,6 +186,7 @@ class MemoryTypeRegistry:
             directory=data.get("directory", ""),
             enabled=data.get("enabled", data.get("enable", True)),
             operation_mode=data.get("operation_mode", "upsert"),
+            agent_only=data.get("agent_only", False),
         )
 
     async def initialize_memory_files(self, ctx: Any) -> None:

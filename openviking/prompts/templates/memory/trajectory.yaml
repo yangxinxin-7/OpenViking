@@ -15,6 +15,7 @@ directory: "viking://agent/{{ agent_space }}/memories/trajectories"
 filename_template: "{{ trajectory_name }}.md"
 enabled: true
 operation_mode: "add_only"
+agent_only: true
 
 fields:
   - name: trajectory_name
