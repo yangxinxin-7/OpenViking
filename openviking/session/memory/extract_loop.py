@@ -172,11 +172,24 @@ The final output of the model must strictly follow the JSON Schema format shown 
         messages.extend(tool_call_messages)
 
         # Track prefetched files in _read_files to avoid unnecessary refetch.
-        # Providers that pre-fetch files (e.g. AgentExperienceContextProvider) expose
-        # them via a `prefetched_uris` attribute so _check_unread_existing_files won't
-        # trigger a spurious second iteration.
+        # Prefer provider-declared prefetched_uris (used by agent memory's formatted
+        # single-message prefetch), and also keep compatibility with the older
+        # tool_call_name JSON message format from upstream/main.
         for uri in getattr(self.context_provider, "prefetched_uris", []):
             self._read_files.add(uri)
+
+        for msg in tool_call_messages:
+            if msg.get("role") == "user" and "tool_call_name" in msg.get("content", ""):
+                import json
+
+                try:
+                    content = json.loads(msg.get("content", "{}"))
+                    if content.get("tool_call_name") == "read":
+                        uri = content.get("args", {}).get("uri")
+                        if uri:
+                            self._read_files.add(uri)
+                except (json.JSONDecodeError, AttributeError):
+                    pass
 
         while iteration < max_iterations:
             iteration += 1
@@ -197,9 +210,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
             # Call LLM with tools - model decides: tool calls OR final operations
             pretty_print_messages(messages)
 
-            tool_calls, operations = await self._call_llm(
-                messages
-            )
+            tool_calls, operations = await self._call_llm(messages)
 
             if tool_calls:
                 has_unknown_tool = await self._execute_tool_calls(messages, tool_calls, tools_used)
@@ -262,6 +273,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
             True if any tool call returned "Unknown tool" error, indicating
             the model should not receive tools in the next iteration.
         """
+
         # Execute all tool calls in parallel
         async def execute_single_tool_call(idx: int, tool_call):
             """Execute a single tool call."""
@@ -340,8 +352,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
             raise ValueError(error_msg)
 
     async def _call_llm(
-        self,
-        messages: List[Dict[str, Any]]
+        self, messages: List[Dict[str, Any]]
     ) -> Tuple[Optional[List], Optional[Any]]:
         """
         Call LLM with tools. Returns either tool calls OR final operations.
@@ -381,6 +392,15 @@ The final output of the model must strictly follow the JSON Schema format shown 
                 if isinstance(usage.get("prompt_tokens_details"), dict)
                 else 0
             )
+            try:
+                from openviking.metrics.datasources.cache import CacheEventDataSource
+
+                if int(cached_tokens or 0) > 0:
+                    CacheEventDataSource.record_hit("L2")
+                else:
+                    CacheEventDataSource.record_miss("L2")
+            except Exception:
+                pass
             if prompt_tokens > 0:
                 cache_hit_rate = (cached_tokens / prompt_tokens) * 100
                 tracer.info(
