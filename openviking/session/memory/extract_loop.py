@@ -171,18 +171,12 @@ The final output of the model must strictly follow the JSON Schema format shown 
         )
         messages.extend(tool_call_messages)
 
-        # Track prefetched files in _read_files to avoid unnecessary refetch
-        for msg in tool_call_messages:
-            if msg.get("role") == "user" and "tool_call_name" in msg.get("content", ""):
-                import json
-                try:
-                    content = json.loads(msg.get("content", "{}"))
-                    if content.get("tool_call_name") == "read":
-                        uri = content.get("args", {}).get("uri")
-                        if uri:
-                            self._read_files.add(uri)
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+        # Track prefetched files in _read_files to avoid unnecessary refetch.
+        # Providers that pre-fetch files (e.g. AgentExperienceContextProvider) expose
+        # them via a `prefetched_uris` attribute so _check_unread_existing_files won't
+        # trigger a spurious second iteration.
+        for uri in getattr(self.context_provider, "prefetched_uris", []):
+            self._read_files.add(uri)
 
         while iteration < max_iterations:
             iteration += 1
@@ -365,7 +359,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
         # Call LLM with tools - use tools from strategy
         tools = None
         tool_choice = None
-        if not self._disable_tools_for_iteration:
+        if not self._disable_tools_for_iteration and self._tool_schemas:
             tools = self._tool_schemas
             tool_choice = "auto"
         response = await asyncio.wait_for(

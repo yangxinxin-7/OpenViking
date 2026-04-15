@@ -1,15 +1,9 @@
 memory_type: trajectory
 description: |
-  A record of one concrete end-to-end task the agent executed.
+  A record of agent execution in one business domain within a conversation.
 
-  Extract when:
-  - The agent worked through an identifiable task involving decisions, tool calls, or multi-step actions.
-
-  Skip when:
-  - Pure chitchat or simple Q&A with no execution trace.
-
-  One conversation may yield 0–N trajectories; each covers ONE distinct task.
-  If two candidates describe the same task, output only one.
+  Extract when the agent worked through identifiable tasks involving decisions, tool calls, or multi-step actions.
+  Skip pure chitchat or simple Q&A with no execution trace.
 
 directory: "viking://agent/{{ agent_space }}/memories/trajectories"
 filename_template: "{{ trajectory_name }}.md"
@@ -47,6 +41,8 @@ fields:
       - Use exactly these 3 labels in this order.
       - Goal and Result are ONE sentence each.
       - Process lists the major steps in order as a numbered list. Each step is one concise sentence.
+      - If a step involves a tool call, record: tool name, key input parameters, and execution status (success / failed / <error reason>).
+        Example: "Called book_flight(flight=MU5101, passenger=user_123) → failed: duplicate booking on same date."
       - Keep the full critical path intact — do not collapse steps that meaningfully changed the execution.
       - Omit only noise: routine confirmations, minor retries, and setup that did not affect the outcome.
       - No extra headings or free paragraphs.

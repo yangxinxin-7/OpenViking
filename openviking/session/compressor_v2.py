@@ -320,7 +320,7 @@ class SessionCompressorV2:
                 except Exception as e:
                     logger.warning(f"Failed to release transaction lock: {e}")
 
-    @tracer()
+    @tracer("agent.memory.extract", ignore_result=True)
     async def extract_agent_memories(
         self,
         messages: List[Message],
@@ -373,7 +373,8 @@ class SessionCompressorV2:
         viking_fs = get_viking_fs()
         for traj_uri in written_trajectory_uris:
             try:
-                traj_content = await viking_fs.read_file(traj_uri, ctx=ctx) or ""
+                from openviking.session.memory.utils.content import deserialize_content as _deser_content
+                traj_content = _deser_content(await viking_fs.read_file(traj_uri, ctx=ctx) or "")
             except Exception as e:
                 logger.warning(f"Failed to read new trajectory {traj_uri}: {e}")
                 continue

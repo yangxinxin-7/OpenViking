@@ -30,12 +30,11 @@ fields:
       <markdown bullets: the effective strategy or key steps to take>
 
       ## Reflect
-      <markdown bullets: what worked and why, what failed or what risks exist, and the core principle to carry forward>
+      <markdown bullets: distilled principles — why the approach works, what risks or failure modes exist, and actionable rules to follow in future>
 
       Rules:
       - Use exactly these 3 headings in this order.
       - Each section uses concise markdown bullets (no numbered lists, no nested headings).
-      - Reflect is mandatory and must be analytical: identify what was effective, what had issues, and state a clear actionable principle for future behavior.
-      - Abstract beyond the specific case — write so the experience applies in similar future contexts.
+      - Reflect must contain only transferable principles and lessons. Write as forward-looking rules that guide future behavior, not as a retrospective summary of what happened in past cases.
     merge_op: patch
 

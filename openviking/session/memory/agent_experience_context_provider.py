@@ -6,9 +6,8 @@ Agent Experience Context Provider - Phase 2 of agent-scope memory extraction.
 Given a new trajectory summary from Phase 1, search for candidate experiences and
 let the LLM decide whether to update an existing one, create a new one, or do nothing.
 
-The LLM may call `get_source_trajectories(experience_uri)` to load historical
-trajectory grounding material for the chosen experience before producing its
-final output.
+No tool calls — all context is prefetched. Top-3 candidates also include their
+source_trajectories as grounding material.
 """
 
 import jinja2
@@ -30,6 +29,8 @@ logger = get_logger(__name__)
 
 EXPERIENCE_MEMORY_TYPE = "experience"
 SEARCH_TOP_K = 5
+SOURCE_TRAJ_TOP_K = 3   # only attach source_trajectories for the top-3 candidates
+MAX_SOURCE_TRAJS = 3    # max trajectories to load per experience
 
 
 class AgentExperienceContextProvider(SessionExtractContextProvider):
@@ -45,28 +46,36 @@ class AgentExperienceContextProvider(SessionExtractContextProvider):
         super().__init__(messages=messages, latest_archive_overview=latest_archive_overview)
         self.trajectory_summary = trajectory_summary
         self.trajectory_uri = trajectory_uri
+        self.prefetched_uris: List[str] = []
 
     def instruction(self) -> str:
         output_language = self._output_language
-        return f"""You distill experience memories from agent execution trajectories.
+        return f"""You are a memory extraction agent. Your job is to distill experience memories from agent execution trajectories.
 
-You are given one new trajectory and candidate existing experiences (searched by relevance).
-If you need the historical trajectories behind an existing experience before updating it,
-call `get_source_trajectories(experience_uri)` — call it at most ONCE per experience URI.
-If the result is already shown in the messages above, do NOT call it again.
+You are given:
+- A new trajectory (the latest agent execution to incorporate)
+- Up to {SEARCH_TOP_K} candidate existing experiences (retrieved by relevance). Top candidates also include their source trajectories as grounding material.
 
-Output one of:
-1. Update an existing experience — when the pattern matches.
-2. Write a new experience — when no existing experience fits.
-3. Merge — when the new trajectory reveals an existing experience is too domain-specific:
-   - Write one new generalized experience that synthesizes both.
-   - Put the old experience's `uri` (the `uri` field from its read result) into `delete_uris`.
-4. Do nothing — only if the trajectory has no transferable lesson.
+The source trajectories are for reference only — do NOT include or modify them in your output.
+
+Choose one of these strategies and output a JSON object matching the schema:
+
+- **Update**: the new trajectory fits an existing experience AND its `experience_name` still accurately describes the broader pattern.
+  → Write the updated experience (same `experience_name`) in the JSON output.
+
+- **Replace**: the new trajectory is related to an existing experience, but the `experience_name` no longer accurately captures the broader pattern after combining.
+  → Write one NEW experience with a better `experience_name` in the JSON output, AND add the old experience's `uri` to `delete_uris`.
+
+- **Create**: no existing experience is related to this trajectory.
+  → Write a new experience in the JSON output.
+
+- **Skip**: the trajectory has no transferable lesson.
+  → Output an empty JSON with no experiences.
 
 Rules:
-- Do not change the name of an existing experience.
+- Do not change the `experience_name` of an existing experience (use Replace instead).
 - Follow field descriptions in the schema.
-- Output JSON only.
+- Output JSON only. Do not call any tools.
 
 All memory content must be written in {output_language}.
 """
@@ -79,7 +88,7 @@ All memory content must be written in {output_language}.
         return [schema]
 
     def get_tools(self) -> List[str]:
-        return ["get_source_trajectories"]
+        return []
 
     def _render_experience_dir(self, ctx: RequestContext) -> str:
         registry = self._get_registry()
@@ -93,6 +102,34 @@ All memory content must be written in {output_language}.
             user_space=user_space, agent_space=agent_space
         )
 
+    async def _load_source_trajectories(
+        self,
+        exp_uri: str,
+        exp_meta: Dict,
+        viking_fs: VikingFS,
+        ctx: RequestContext,
+    ) -> List[Dict]:
+        """Load the most recent source trajectories for a candidate experience."""
+        raw = exp_meta.get("source_trajectories", [])
+        if isinstance(raw, list):
+            uris = [str(u).strip() for u in raw if str(u).strip()]
+        elif isinstance(raw, str):
+            uris = [line.strip() for line in raw.splitlines() if line.strip()]
+        else:
+            uris = []
+
+        from openviking.session.memory.utils.content import deserialize_content
+
+        recent_uris = uris[-MAX_SOURCE_TRAJS:]
+        results = []
+        for uri in recent_uris:
+            try:
+                raw = await viking_fs.read_file(uri, ctx=ctx) or ""
+                results.append({"uri": uri, "content": deserialize_content(raw)})
+            except Exception as e:
+                logger.warning(f"Failed to read source trajectory {uri}: {e}")
+        return results
+
     async def prefetch(
         self,
         ctx: RequestContext,
@@ -104,31 +141,11 @@ All memory content must be written in {output_language}.
             logger.warning(f"Expected List[Message], got {type(self.messages)}")
             return []
 
-        pre_fetch_messages: List[Dict] = []
-
-        pre_fetch_messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "## New Trajectory\n"
-                    f"Trajectory URI: `{self.trajectory_uri}`\n\n"
-                    f"{self.trajectory_summary}\n\n"
-                    "The tool call results below show candidate existing experiences. "
-                    "Decide whether to edit one, write one, or do nothing."
-                ),
-            }
-        )
-
         experience_dir = self._render_experience_dir(ctx)
-        if not experience_dir:
-            return pre_fetch_messages
-
         search_tool = get_tool("search")
-        read_tool = get_tool("read")
-        call_id_seq = 0
 
         candidate_uris: List[str] = []
-        if search_tool and viking_fs:
+        if experience_dir and search_tool and viking_fs:
             tool_ctx_search = ToolContext(
                 request_ctx=ctx,
                 transaction_handle=transaction_handle,
@@ -149,51 +166,73 @@ All memory content must be written in {output_language}.
                         for m in search_result.get("memories", [])
                         if m.get("uri")
                     ]
-                result_value = candidate_uris if candidate_uris else search_result
-                add_tool_call_pair_to_messages(
-                    messages=pre_fetch_messages,
-                    call_id=call_id_seq,
-                    tool_name="search",
-                    params={"query": "[new trajectory]", "search_uri": experience_dir},
-                    result=result_value,
-                )
-                call_id_seq += 1
             except Exception as e:
                 logger.warning(f"Failed to search experiences in {experience_dir}: {e}")
 
-        if not read_tool or not candidate_uris:
-            return pre_fetch_messages
+        from openviking.session.memory.utils.content import (
+            deserialize_content,
+            deserialize_metadata,
+        )
 
-        for exp_uri in candidate_uris:
+        # Build candidate experiences section
+        exp_sections: List[str] = []
+        for idx, exp_uri in enumerate(candidate_uris):
             try:
                 exp_raw = await viking_fs.read_file(exp_uri, ctx=ctx)
             except Exception as e:
                 logger.warning(f"Failed to read experience {exp_uri}: {e}")
                 continue
 
-            # Present experience to LLM as clean structured data (body + key metadata),
-            # NOT the raw file — the MEMORY_FIELDS HTML comment confuses the LLM into
-            # copying JSON fragments into content fields.
-            from openviking.session.memory.utils.content import (
-                deserialize_content,
-                deserialize_metadata,
-            )
-
+            self.prefetched_uris.append(exp_uri)
             body = deserialize_content(exp_raw)
             meta = deserialize_metadata(exp_raw) or {}
-            result = {
-                "uri": exp_uri,
-                "experience_name": meta.get("experience_name", ""),
-                "content": body,
-            }
+            exp_name = meta.get("experience_name", "")
 
-            add_tool_call_pair_to_messages(
-                messages=pre_fetch_messages,
-                call_id=call_id_seq,
-                tool_name="read",
-                params={"uri": exp_uri},
-                result=result,
-            )
-            call_id_seq += 1
+            section = f"### Experience {idx + 1}: `{exp_name}`\nURI: `{exp_uri}`\n\n{body}"
 
-        return pre_fetch_messages
+            # Attach source trajectories for top-3 only
+            if idx < SOURCE_TRAJ_TOP_K and viking_fs:
+                source_trajs = await self._load_source_trajectories(exp_uri, meta, viking_fs, ctx)
+                if source_trajs:
+                    traj_lines = ["\n#### Source Trajectories (for reference only)"]
+                    for i, t in enumerate(source_trajs, 1):
+                        traj_lines.append(f"\n**Trajectory {i}** (`{t['uri']}`):\n{t['content']}")
+                    section += "\n" + "\n".join(traj_lines)
+
+            exp_sections.append(section)
+
+        # Assemble single user message
+        lines = [
+            "## New Trajectory",
+            f"URI: `{self.trajectory_uri}`",
+            "",
+            self.trajectory_summary,
+        ]
+
+        if exp_sections:
+            lines += [
+                "",
+                "---",
+                "",
+                "## Candidate Existing Experiences",
+                "",
+                "\n\n---\n\n".join(exp_sections),
+            ]
+        else:
+            lines += [
+                "",
+                "---",
+                "",
+                "## Candidate Existing Experiences",
+                "",
+                "No existing experiences found.",
+            ]
+
+        lines += [
+            "",
+            "---",
+            "",
+            "Based on the above, decide whether to **Update**, **Replace**, **Create**, or **Skip**. Output JSON only.",
+        ]
+
+        return [{"role": "user", "content": "\n".join(lines)}]

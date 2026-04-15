@@ -506,10 +506,10 @@ class MemoryUpdater:
             # Print directly
             tracer.info("diff=" + "\n".join(lines))
         except ImportError:
-            # Fallback: just show file name
-            tracer.error(f"diff_match_patch not available, skipping diff for {uri}")
+            # diff_match_patch is optional; skip diff display silently
+            tracer.info(f"diff_match_patch not available, skipping diff for {uri}")
         except Exception as e:
-            tracer.error(f"Failed to print diff for {uri}: {e}")
+            tracer.info(f"Failed to print diff for {uri}: {e}")
 
     async def _vectorize_memories(
         self,
