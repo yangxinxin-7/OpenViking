@@ -3,9 +3,8 @@ name: 05. OpenClaw2OpenViking Memory Tests
 on:
   release:
     types: [prereleased, released]
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: '0 2,10 * * *'
   workflow_dispatch:
     inputs:
       skip_tests:
@@ -30,8 +29,8 @@ jobs:
   p0-tests:
     name: P0 Memory Tests
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 70
-    if: inputs.skip_tests != true
+    timeout-minutes: 100
+    if: inputs.skip_tests != true && (github.event_name == 'workflow_dispatch' || github.repository == 'volcengine/OpenViking')
     
     steps:
       - name: Clean up previous artifacts

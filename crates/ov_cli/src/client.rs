@@ -3,11 +3,35 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::fs::File;
 use std::path::Path;
+use std::str::FromStr;
 use tempfile::{Builder, NamedTempFile};
 use zip::CompressionMethod;
 use zip::write::FileOptions;
 
 use crate::error::{Error, Result};
+
+fn api_error_from_envelope(json: &Value, status: StatusCode) -> String {
+    let error_code = json
+        .get("error")
+        .and_then(|e| e.get("code"))
+        .and_then(|c| c.as_str());
+    let error_msg = json
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            json.get("detail")
+                .and_then(|d| d.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| format!("HTTP error {}", status));
+
+    match error_code {
+        Some(code) => format!("[{}] {}", code, error_msg),
+        None => error_msg,
+    }
+}
 
 /// High-level HTTP client for OpenViking API
 #[derive(Clone)]
@@ -18,6 +42,7 @@ pub struct HttpClient {
     account: Option<String>,
     user: Option<String>,
     agent_id: Option<String>,
+    extra_headers: Option<std::collections::HashMap<String, String>>,
 }
 
 impl HttpClient {
@@ -29,6 +54,7 @@ impl HttpClient {
         account: Option<String>,
         user: Option<String>,
         timeout_secs: f64,
+        extra_headers: Option<std::collections::HashMap<String, String>>,
     ) -> Self {
         let http = ReqwestClient::builder()
             .timeout(std::time::Duration::from_secs_f64(timeout_secs))
@@ -42,7 +68,20 @@ impl HttpClient {
             account,
             user,
             agent_id,
+            extra_headers,
         }
+    }
+
+    pub fn user_id(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
+    pub fn agent_id(&self) -> Option<&str> {
+        self.agent_id.as_deref()
+    }
+
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
     }
 
     /// Zip a directory to a temporary file
@@ -153,6 +192,15 @@ impl HttpClient {
                 headers.insert("X-OpenViking-User", value);
             }
         }
+        if let Some(extra_headers) = &self.extra_headers {
+            for (key, value) in extra_headers {
+                if let Ok(header_name) = reqwest::header::HeaderName::from_str(key) {
+                    if let Ok(header_value) = reqwest::header::HeaderValue::from_str(value) {
+                        headers.insert(header_name, header_value);
+                    }
+                }
+            }
+        }
         headers
     }
 
@@ -260,25 +308,28 @@ impl HttpClient {
                 .map_err(|e| Error::Parse(format!("Failed to parse empty response: {}", e)));
         }
 
-        let json: Value = response
-            .json()
+        // First get the raw bytes/text to enable debugging when JSON parsing fails
+        let bytes = response
+            .bytes()
             .await
-            .map_err(|e| Error::Network(format!("Failed to parse JSON response: {}", e)))?;
+            .map_err(|e| Error::Network(format!("Failed to read response body: {}", e)))?;
+
+        // Try to parse as JSON
+        let json: Value = match serde_json::from_slice(&bytes) {
+            Ok(json) => json,
+            Err(e) => {
+                // If parsing fails, try to convert bytes to string for debugging
+                let body_str = String::from_utf8_lossy(&bytes);
+                return Err(Error::Network(format!(
+                    "Failed to parse JSON response: {}\n\nRaw response body:\n{}",
+                    e, body_str
+                )));
+            }
+        };
 
         // Handle HTTP errors
         if !status.is_success() {
-            let error_msg = json
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    json.get("detail")
-                        .and_then(|d| d.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| format!("HTTP error {}", status));
-            return Err(Error::Api(error_msg));
+            return Err(Error::Api(api_error_from_envelope(&json, status)));
         }
 
         // Handle API errors (status == success but body has error)
@@ -300,11 +351,17 @@ impl HttpClient {
         let result = if let Some(result) = json.get("result") {
             result.clone()
         } else {
-            json
+            json.clone()
         };
 
         serde_json::from_value(result)
-            .map_err(|e| Error::Parse(format!("Failed to deserialize response: {}", e)))
+            .map_err(|e| {
+                // If final deserialization fails, include the JSON we were trying to parse
+                Error::Parse(format!(
+                    "Failed to deserialize response: {}\n\nJSON that failed to parse:\n{}",
+                    e, json
+                ))
+            })
     }
 
     // ============ Content Methods ============
@@ -382,13 +439,13 @@ impl HttpClient {
 
         let status = response.status();
         if !status.is_success() {
-            // Try to parse error message as JSON
-            let json_result: Result<serde_json::Value> = response
-                .json()
+            // Try to parse error message as JSON, but if that fails show raw response
+            let bytes = response
+                .bytes()
                 .await
-                .map_err(|e| Error::Network(format!("Failed to parse error response: {}", e)));
+                .map_err(|e| Error::Network(format!("Failed to read error response: {}", e)))?;
 
-            let error_msg = match json_result {
+            let error_msg = match serde_json::from_slice::<serde_json::Value>(&bytes) {
                 Ok(json) => json
                     .get("error")
                     .and_then(|e| e.get("message"))
@@ -400,7 +457,10 @@ impl HttpClient {
                             .map(|s| s.to_string())
                     })
                     .unwrap_or_else(|| format!("HTTP error {}", status)),
-                Err(_) => format!("HTTP error {}", status),
+                Err(_) => {
+                    let body_str = String::from_utf8_lossy(&bytes);
+                    format!("HTTP error {}\n\nRaw response body:\n{}", status, body_str)
+                }
             };
 
             return Err(Error::Api(error_msg));
@@ -777,13 +837,13 @@ impl HttpClient {
 
         let status = response.status();
         if !status.is_success() {
-            // Try to parse error message as JSON
-            let json_result: Result<serde_json::Value> = response
-                .json()
+            // Try to parse error message as JSON, but if that fails show raw response
+            let bytes = response
+                .bytes()
                 .await
-                .map_err(|e| Error::Network(format!("Failed to parse error response: {}", e)));
+                .map_err(|e| Error::Network(format!("Failed to read error response: {}", e)))?;
 
-            let error_msg = match json_result {
+            let error_msg = match serde_json::from_slice::<serde_json::Value>(&bytes) {
                 Ok(json) => json
                     .get("error")
                     .and_then(|e| e.get("message"))
@@ -795,7 +855,10 @@ impl HttpClient {
                             .map(|s| s.to_string())
                     })
                     .unwrap_or_else(|| format!("HTTP error {}", status)),
-                Err(_) => format!("HTTP error {}", status),
+                Err(_) => {
+                    let body_str = String::from_utf8_lossy(&bytes);
+                    format!("HTTP error {}\n\nRaw response body:\n{}", status, body_str)
+                }
             };
 
             return Err(Error::Api(error_msg));
@@ -899,8 +962,26 @@ impl HttpClient {
         self.post(&path, &body).await
     }
 
-    pub async fn admin_list_users(&self, account_id: &str) -> Result<Value> {
+    pub async fn admin_list_users(
+        &self,
+        account_id: &str,
+        limit: u32,
+        name: Option<String>,
+        role: Option<String>,
+    ) -> Result<Value> {
         let path = format!("/api/v1/admin/accounts/{}/users", account_id);
+        let mut params = vec![("limit".to_string(), limit.to_string())];
+        if let Some(n) = name {
+            params.push(("name".to_string(), n));
+        }
+        if let Some(r) = role {
+            params.push(("role".to_string(), r));
+        }
+        self.get(&path, &params).await
+    }
+
+    pub async fn admin_list_agents(&self, account_id: &str) -> Result<Value> {
+        let path = format!("/api/v1/admin/accounts/{}/agents", account_id);
         self.get(&path, &[]).await
     }
 
@@ -982,12 +1063,83 @@ impl HttpClient {
 
         Ok(count)
     }
+
+    // ============ Privacy Config Methods ============
+
+    pub async fn privacy_list_categories(&self) -> Result<serde_json::Value> {
+        self.get("/api/v1/privacy-configs", &[]).await
+    }
+
+    pub async fn privacy_list_targets(&self, category: &str) -> Result<serde_json::Value> {
+        let path = format!("/api/v1/privacy-configs/{}", category);
+        self.get(&path, &[]).await
+    }
+
+    pub async fn privacy_get_current(
+        &self,
+        category: &str,
+        target_key: &str,
+    ) -> Result<serde_json::Value> {
+        let path = format!("/api/v1/privacy-configs/{}/{}", category, target_key);
+        self.get(&path, &[]).await
+    }
+
+    pub async fn privacy_upsert(
+        &self,
+        category: &str,
+        target_key: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let path = format!("/api/v1/privacy-configs/{}/{}", category, target_key);
+        self.post(&path, body).await
+    }
+
+    pub async fn privacy_list_versions(
+        &self,
+        category: &str,
+        target_key: &str,
+    ) -> Result<serde_json::Value> {
+        let path = format!(
+            "/api/v1/privacy-configs/{}/{}/versions",
+            category, target_key
+        );
+        self.get(&path, &[]).await
+    }
+
+    pub async fn privacy_get_version(
+        &self,
+        category: &str,
+        target_key: &str,
+        version: i32,
+    ) -> Result<serde_json::Value> {
+        let path = format!(
+            "/api/v1/privacy-configs/{}/{}/versions/{}",
+            category, target_key, version
+        );
+        self.get(&path, &[]).await
+    }
+
+    pub async fn privacy_activate(
+        &self,
+        category: &str,
+        target_key: &str,
+        version: i32,
+    ) -> Result<serde_json::Value> {
+        let path = format!(
+            "/api/v1/privacy-configs/{}/{}/activate",
+            category, target_key
+        );
+        let body = serde_json::json!({ "version": version });
+        self.post(&path, &body).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::HttpClient;
+    use super::{HttpClient, api_error_from_envelope};
+    use reqwest::StatusCode;
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn build_headers_includes_tenant_identity_headers() {
@@ -998,6 +1150,7 @@ mod tests {
             Some("acme".to_string()),
             Some("alice".to_string()),
             5.0,
+            None,
         );
 
         let headers = client.build_headers();
@@ -1029,6 +1182,34 @@ mod tests {
     }
 
     #[test]
+    fn build_headers_includes_extra_headers() {
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert("X-Custom-Header".to_string(), "custom-value".to_string());
+        extra_headers.insert("Authorization".to_string(), "Bearer token".to_string());
+
+        let client = HttpClient::new(
+            "http://localhost:1933",
+            Some("test-key".to_string()),
+            Some("assistant-1".to_string()),
+            Some("acme".to_string()),
+            Some("alice".to_string()),
+            5.0,
+            Some(extra_headers),
+        );
+
+        let headers = client.build_headers();
+
+        assert_eq!(
+            headers.get("X-Custom-Header").and_then(|value| value.to_str().ok()),
+            Some("custom-value")
+        );
+        assert_eq!(
+            headers.get("Authorization").and_then(|value| value.to_str().ok()),
+            Some("Bearer token")
+        );
+    }
+
+    #[test]
     fn build_write_body_omits_removed_semantic_flags() {
         let body = HttpClient::build_write_body(
             "viking://resources/demo.md",
@@ -1050,5 +1231,37 @@ mod tests {
         );
         assert!(body.get("regenerate_semantics").is_none());
         assert!(body.get("revectorize").is_none());
+    }
+
+    #[test]
+    fn standard_error_envelope_formats_api_error() {
+        let body = json!({
+            "status": "error",
+            "error": {
+                "code": "PROCESSING_ERROR",
+                "message": "Parse error: boom"
+            }
+        });
+
+        assert_eq!(
+            api_error_from_envelope(&body, StatusCode::INTERNAL_SERVER_ERROR),
+            "[PROCESSING_ERROR] Parse error: boom"
+        );
+    }
+
+    #[test]
+    fn successful_result_status_failed_stays_domain_status() {
+        let envelope = json!({
+            "status": "ok",
+            "result": {
+                "status": "failed",
+                "task_id": "task-1",
+                "error": "boom"
+            }
+        });
+        let result = envelope.get("result").unwrap();
+
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["task_id"], "task-1");
     }
 }

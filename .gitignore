@@ -119,6 +119,7 @@ docker-compose.override.yml
 *.code-workspace
 .openviking.pid
 exports/
+.local-data/
 
 # API Test temporary files
 tests/api_test/api-test-report.html
@@ -175,6 +176,9 @@ celerybeat-schedule
 # mkdocs documentation
 /site
 docs/superpowers/
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 
 # mypy
 .mypy_cache/

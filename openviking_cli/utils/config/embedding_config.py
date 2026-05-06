@@ -37,7 +37,7 @@ class EmbeddingModelConfig(BaseModel):
     provider: Optional[str] = Field(
         default="volcengine",
         description=(
-            "Provider type: 'openai', 'volcengine', 'vikingdb', 'jina', 'ollama', 'gemini', 'voyage', 'litellm', 'local'. "
+            "Provider type: 'openai', 'volcengine', 'vikingdb', 'jina', 'ollama', 'gemini', 'voyage', 'dashscope', 'minimax', 'cohere', 'litellm', 'local'. "
             "For OpenRouter or other OpenAI-compatible providers, use 'litellm' with "
             "api_base and api_key, or 'openai' with api_base and extra_headers."
         ),
@@ -70,6 +70,18 @@ class EmbeddingModelConfig(BaseModel):
     cache_dir: Optional[str] = Field(
         default=None,
         description="Local model cache directory for provider='local'.",
+    )
+    enable_fusion: Optional[bool] = Field(
+        default=None,
+        description="Enable multimodal fusion for DashScope provider (multimodal models only).",
+    )
+    res_level: Optional[int] = Field(
+        default=None,
+        description="Resolution level for DashScope multimodal models (multimodal models only).",
+    )
+    max_video_frames: Optional[int] = Field(
+        default=None,
+        description="Maximum video frames for DashScope multimodal models (multimodal models only).",
     )
 
     model_config = {"extra": "forbid"}
@@ -110,6 +122,7 @@ class EmbeddingModelConfig(BaseModel):
             "ollama",
             "gemini",
             "voyage",
+            "dashscope",
             "minimax",
             "cohere",
             "litellm",
@@ -117,7 +130,7 @@ class EmbeddingModelConfig(BaseModel):
         ]:
             raise ValueError(
                 f"Invalid embedding provider: '{self.provider}'. Must be one of: "
-                "'openai', 'azure', 'volcengine', 'vikingdb', 'jina', 'ollama', 'gemini', 'voyage', 'minimax', 'cohere', 'litellm', 'local'"
+                "'openai', 'azure', 'volcengine', 'vikingdb', 'jina', 'ollama', 'gemini', 'voyage', 'dashscope', 'minimax', 'cohere', 'litellm', 'local'"
             )
 
         # Provider-specific validation
@@ -193,6 +206,18 @@ class EmbeddingModelConfig(BaseModel):
             if not self.api_key:
                 raise ValueError("Cohere provider requires 'api_key' to be set")
 
+        elif self.provider == "dashscope":
+            if not self.api_key:
+                raise ValueError("DashScope provider requires 'api_key' to be set")
+            if self.input == "text" and (
+                self.enable_fusion is not None
+                or self.res_level is not None
+                or self.max_video_frames is not None
+            ):
+                raise ValueError(
+                    "Parameters enable_fusion, res_level, and max_video_frames only apply to multimodal input mode"
+                )
+
         elif self.provider == "litellm":
             # litellm handles auth via env vars or explicit api_key; no strict requirement
             if not self.dimension:
@@ -214,6 +239,16 @@ class EmbeddingModelConfig(BaseModel):
             return self.dimension
 
         provider = (self.provider or "").lower()
+        if provider in {"openai", "azure"}:
+            openai_model_dimensions = {
+                "text-embedding-ada-002": 1536,
+                "text-embedding-3-small": 1536,
+                "text-embedding-3-large": 3072,
+            }
+            model_lower = (self.model or "").lower()
+            if model_lower in openai_model_dimensions:
+                return openai_model_dimensions[model_lower]
+
         if provider == "voyage":
             from openviking.models.embedder.voyage_embedders import (
                 get_voyage_model_default_dimension,
@@ -267,6 +302,17 @@ class EmbeddingModelConfig(BaseModel):
             from openviking.models.embedder.local_embedders import get_local_model_default_dimension
 
             return get_local_model_default_dimension(self.model)
+
+        if provider == "dashscope":
+            try:
+                from openviking.models.embedder.dashscope_embedders import (
+                    get_dashscope_model_default_dimension,
+                )
+
+                return get_dashscope_model_default_dimension(self.model)
+            except ImportError:
+                # Fallback dimension if dashscope_embedders module doesn't exist yet
+                return 1024
 
         return 2048
 
@@ -322,13 +368,13 @@ class EmbeddingConfig(BaseModel):
         description="Maximum retry attempts for embedding provider calls (0 disables retry)",
     )
     text_source: str = Field(
-        default="summary_first",
+        default="content_only",
         description="Text source for file vectorization: summary_first|summary_only|content_only",
     )
-    max_input_chars: int = Field(
-        default=1000,
+    max_input_tokens: int = Field(
+        default=4096,
         ge=100,
-        description="Maximum characters sent to embeddings when raw text fallback is used",
+        description="Maximum estimated tokens sent to embeddings when raw text fallback is used",
     )
 
     model_config = {"extra": "forbid"}
@@ -383,6 +429,7 @@ class EmbeddingConfig(BaseModel):
         """
         from openviking.models.embedder import (
             CohereDenseEmbedder,
+            DashScopeDenseEmbedder,
             GeminiDenseEmbedder,
             JinaDenseEmbedder,
             LiteLLMDenseEmbedder,
@@ -484,6 +531,8 @@ class EmbeddingConfig(BaseModel):
                     "dimension": cfg.dimension,
                     "input_type": cfg.input,
                     "config": dict(runtime_config),
+                    **({"query_param": cfg.query_param} if cfg.query_param else {}),
+                    **({"document_param": cfg.document_param} if cfg.document_param else {}),
                 },
             ),
             ("vikingdb", "sparse"): (
@@ -510,6 +559,8 @@ class EmbeddingConfig(BaseModel):
                     "dimension": cfg.dimension,
                     "input_type": cfg.input,
                     "config": dict(runtime_config),
+                    **({"query_param": cfg.query_param} if cfg.query_param else {}),
+                    **({"document_param": cfg.document_param} if cfg.document_param else {}),
                 },
             ),
             ("jina", "dense"): (
@@ -569,6 +620,28 @@ class EmbeddingConfig(BaseModel):
                     **({"query_param": cfg.query_param} if cfg.query_param else {}),
                     **({"document_param": cfg.document_param} if cfg.document_param else {}),
                     **({"extra_headers": cfg.extra_headers} if cfg.extra_headers else {}),
+                },
+            ),
+            ("dashscope", "dense"): (
+                DashScopeDenseEmbedder,
+                lambda cfg: {
+                    "model_name": cfg.model,
+                    "api_key": cfg.api_key,
+                    "api_base": cfg.api_base,
+                    "dimension": cfg.dimension,
+                    "input_type": cfg.input,
+                    "config": dict(runtime_config),
+                    **(
+                        {"enable_fusion": cfg.enable_fusion}
+                        if cfg.enable_fusion is not None
+                        else {}
+                    ),
+                    **({"res_level": cfg.res_level} if cfg.res_level is not None else {}),
+                    **(
+                        {"max_video_frames": cfg.max_video_frames}
+                        if cfg.max_video_frames is not None
+                        else {}
+                    ),
                 },
             ),
             ("cohere", "dense"): (

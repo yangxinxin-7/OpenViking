@@ -84,7 +84,6 @@ function setupPlugin(clientOverrides?: Record<string, unknown>) {
       baseUrl: "http://127.0.0.1:1933",
       autoCapture: false,
       autoRecall: false,
-      ingestReplyAssist: false,
     },
     logger: {
       info: vi.fn(),
@@ -181,6 +180,113 @@ describe("Tool: memory_store (behavioral)", () => {
     expect(store).toBeDefined();
     expect(store!.name).toBe("memory_store");
     expect(store!.description).toContain("Store text");
+  });
+
+  it("uses requesterSenderId to populate role_id for user writes", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/v1/system/status")) {
+        return okResponse({ user: "default" });
+      }
+      if (url.includes("/messages")) {
+        return okResponse({ session_id: "sess-1" });
+      }
+      if (url.endsWith("/commit")) {
+        return okResponse({
+          status: "completed",
+          archived: false,
+          memories_extracted: { core: 1 },
+        });
+      }
+      return okResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { factoryTools, api } = setupPlugin();
+    contextEnginePlugin.register(api as any);
+    const factory = factoryTools.get("memory_store");
+    expect(factory).toBeDefined();
+
+    const tool = factory!({
+      sessionId: "runtime-session",
+      sessionKey: "agent:main:main",
+      requesterSenderId: "wx/user-01@abc",
+    });
+
+    await tool.execute("tc-memory-store", { text: "hello from tool" });
+
+    const messageCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/v1/sessions/") && String(url).includes("/messages"),
+    );
+    expect(messageCall).toBeDefined();
+    const [, init] = messageCall as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.role).toBe("user");
+    expect(body.role_id).toBe("wx_user-01_abc");
+  });
+
+  it("uses a temporary session by default instead of the current tool session", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/v1/system/status")) {
+        return okResponse({ user: "default" });
+      }
+      if (url.includes("/messages")) {
+        return okResponse({ session_id: "sess-1" });
+      }
+      if (url.endsWith("/commit")) {
+        return okResponse({ status: "completed", archived: false, memories_extracted: {} });
+      }
+      return okResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { factoryTools, api } = setupPlugin();
+    contextEnginePlugin.register(api as any);
+    const tool = factoryTools.get("memory_store")!({
+      sessionId: "runtime-session",
+      sessionKey: "agent:main:main",
+    });
+
+    await tool.execute("tc-memory-store", { text: "hello from tool" });
+
+    const messageCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/v1/sessions/") && String(url).includes("/messages"),
+    );
+    expect(String(messageCall?.[0])).toContain("/api/v1/sessions/memory-store-");
+  });
+
+  it("normalizes explicit memory_store sessionId without using current sessionKey", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/v1/system/status")) {
+        return okResponse({ user: "default" });
+      }
+      if (url.includes("/messages")) {
+        return okResponse({ session_id: "sess-1" });
+      }
+      if (url.endsWith("/commit")) {
+        return okResponse({ status: "completed", archived: false, memories_extracted: {} });
+      }
+      return okResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { factoryTools, api } = setupPlugin();
+    contextEnginePlugin.register(api as any);
+    const tool = factoryTools.get("memory_store")!({
+      sessionId: "runtime-session",
+      sessionKey: "agent:main:main",
+    });
+
+    await tool.execute("tc-memory-store", {
+      text: "hello from tool",
+      sessionId: "C:\\Users\\test",
+    });
+
+    const messageCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/v1/sessions/") && String(url).includes("/messages"),
+    );
+    expect(String(messageCall?.[0])).not.toContain("runtime-session");
+    expect(String(messageCall?.[0])).not.toContain("agent%3Amain%3Amain");
+    expect(String(messageCall?.[0])).toMatch(/\/api\/v1\/sessions\/[a-f0-9]{64}\/messages$/);
   });
 });
 
@@ -505,10 +611,10 @@ describe("OpenViking search command parsing", () => {
 });
 
 describe("Plugin registration", () => {
-  it("registers all 6 tools", () => {
+  it("registers all 7 tools", () => {
     const { api } = setupPlugin();
     contextEnginePlugin.register(api as any);
-    expect(api.registerTool).toHaveBeenCalledTimes(6);
+    expect(api.registerTool).toHaveBeenCalledTimes(7);
   });
 
   it("registers import and search commands", () => {
@@ -564,6 +670,66 @@ describe("Plugin registration", () => {
     expect(headers.get("X-OpenViking-Agent")).toBe("worker");
   });
 
+  it("search command propagates configured tenant headers", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/v1/search/find")) {
+        return okResponse({ memories: [], resources: [], skills: [], total: 0 });
+      }
+      return okResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { commands, api } = setupPlugin();
+    api.pluginConfig = {
+      ...api.pluginConfig,
+      accountId: "acct-shared",
+      userId: "alice",
+    };
+    contextEnginePlugin.register(api as any);
+
+    await commands.get("ov-search")!.handler({
+      args: "test query --uri viking://resources",
+      commandBody: "/ov-search",
+      agentId: "worker",
+      sessionId: "session-1",
+      sessionKey: "agent:worker:session-1",
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => String(call[0]).endsWith("/api/v1/search/find")) as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get("X-OpenViking-Account")).toBe("acct-shared");
+    expect(headers.get("X-OpenViking-User")).toBe("alice");
+    expect(headers.get("X-OpenViking-Agent")).toBe("worker");
+  });
+
+  it("import tool propagates configured tenant headers for resource imports", async () => {
+    const fetchMock = vi.fn(async () =>
+      okResponse({ root_uri: "viking://resources/shared-docs", status: "success" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { tools, api } = setupPlugin();
+    api.pluginConfig = {
+      ...api.pluginConfig,
+      accountId: "acct-shared",
+      userId: "alice",
+    };
+    contextEnginePlugin.register(api as any);
+
+    const tool = tools.get("ov_import")!;
+    await tool.execute("tc-import", {
+      kind: "resource",
+      source: "https://example.com/docs",
+      to: "viking://resources/shared-docs",
+      wait: true,
+    });
+
+    const [, init] = fetchMock.mock.calls.find((call) => String(call[0]).endsWith("/api/v1/resources")) as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get("X-OpenViking-Account")).toBe("acct-shared");
+    expect(headers.get("X-OpenViking-User")).toBe("alice");
+  });
+
   it("slash commands honor bypassSessionPatterns", async () => {
     const fetchMock = vi.fn(async () => okResponse({}));
     vi.stubGlobal("fetch", fetchMock);
@@ -602,16 +768,16 @@ describe("Plugin registration", () => {
     );
   });
 
-  it("registers hooks: session_start, session_end, before_prompt_build, agent_end, before_reset, after_compaction", () => {
+  it("registers hooks: session_start, session_end, agent_end, before_reset, after_compaction", () => {
     const { api } = setupPlugin();
     contextEnginePlugin.register(api as any);
     const hookNames = api.on.mock.calls.map((c: unknown[]) => c[0]);
     expect(hookNames).toContain("session_start");
     expect(hookNames).toContain("session_end");
-    expect(hookNames).toContain("before_prompt_build");
     expect(hookNames).toContain("agent_end");
     expect(hookNames).toContain("before_reset");
     expect(hookNames).toContain("after_compaction");
+    expect(hookNames).not.toContain("before_prompt_build");
   });
 
   it("plugin has correct metadata", () => {

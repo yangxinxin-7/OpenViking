@@ -21,7 +21,6 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage.errors import (
     CollectionNotFoundError,
     EmbeddingConfigurationError,
-    EmbeddingRebuildRequiredError,
 )
 from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
@@ -103,7 +102,8 @@ class CollectionSchemas:
                 {"FieldName": "tags", "FieldType": "string"},
                 {"FieldName": "abstract", "FieldType": "string"},
                 {"FieldName": "account_id", "FieldType": "string"},
-                {"FieldName": "owner_space", "FieldType": "string"},
+                {"FieldName": "owner_user_id", "FieldType": "string"},
+                {"FieldName": "owner_agent_id", "FieldType": "string"},
             ]
         )
         scalar_index = [
@@ -120,7 +120,8 @@ class CollectionSchemas:
                 "name",
                 "tags",
                 "account_id",
-                "owner_space",
+                "owner_user_id",
+                "owner_agent_id",
             ]
         )
         return {
@@ -213,6 +214,17 @@ async def init_context_collection(storage) -> bool:
         raise ValueError("Vector DB collection name is required")
     collection_name = name
     embedding_meta = _build_embedding_metadata(config)
+    vectordb_cfg = config.storage.vectordb
+    uses_volcengine_data_plane = bool(
+        vectordb_cfg.backend == "volcengine"
+        and getattr(getattr(vectordb_cfg, "volcengine", None), "api_key", None)
+    )
+    if uses_volcengine_data_plane:
+        logger.info(
+            "Skip collection bootstrap for volcengine data-plane backend; "
+            "collection/index/schema must be pre-created out of band"
+        )
+        return False
     schema = CollectionSchemas.context_collection(
         collection_name,
         vector_dim,
@@ -419,7 +431,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                     self._breaker_open_suppressed_count = 0
                 except CircuitBreakerOpen:
                     self._log_breaker_open_reenqueue_summary()
-                    if self._vikingdb.has_queue_manager:
+                    if getattr(self._vikingdb, "has_queue_manager", False):
                         wait = self._circuit_breaker.retry_after
                         if wait > 0:
                             await asyncio.sleep(wait)
@@ -489,7 +501,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                         # Transient or unknown — re-enqueue for retry
                         logger.warning(error_msg)
                         self._circuit_breaker.record_failure(embed_err)
-                        if self._vikingdb.has_queue_manager:
+                        if getattr(self._vikingdb, "has_queue_manager", False):
                             try:
                                 await self._vikingdb.enqueue_embedding_msg(embedding_msg)
                                 self._merge_request_stats(

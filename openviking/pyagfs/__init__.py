@@ -6,6 +6,7 @@ import glob
 import importlib.util
 import logging
 import os
+import sys
 import sysconfig
 from pathlib import Path
 
@@ -42,6 +43,27 @@ _logger = logging.getLogger(__name__)
 _LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
 
 
+def _is_compatible_ragfs_extension(path: str, ext_suffix: str) -> bool:
+    """Return whether a vendored ragfs_python extension can be loaded here."""
+    name = Path(path).name
+    if not name.startswith("ragfs_python"):
+        return False
+
+    # CPython-specific extensions are only safe for the exact running
+    # interpreter ABI tag. Reject both Unix-style `.cpython-312-...` and
+    # Windows-style `.cp312-...` artifacts unless they exactly match
+    # the active EXT_SUFFIX.
+    if name.startswith("ragfs_python.cp") and not name.startswith("ragfs_python.abi3."):
+        return name == f"ragfs_python{ext_suffix}"
+
+    # Stable ABI artifacts are intentionally interpreter-independent.
+    if name.startswith("ragfs_python.abi3."):
+        return True
+
+    # Keep accepting generic platform extensions when projects ship them.
+    return name.endswith((".so", ".dylib", ".pyd"))
+
+
 def _find_ragfs_so():
     """Locate the ragfs_python native extension inside openviking/lib/.
 
@@ -49,15 +71,23 @@ def _find_ragfs_so():
     """
     try:
         ext_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
-        # Exact match first: ragfs_python.cpython-312-darwin.so
+        # Exact match first: ragfs_python.cpython-312-darwin.so or ragfs_python.abi3.so
         exact = _LIB_DIR / f"ragfs_python{ext_suffix}"
         if exact.exists():
             return str(exact)
-        # Glob fallback: ragfs_python.cpython-*.so / ragfs_python.*.pyd
-        for pattern in ("ragfs_python.cpython-*", "ragfs_python.*"):
-            matches = glob.glob(str(_LIB_DIR / pattern))
-            if matches:
-                return matches[0]
+        # Try abi3 suffix explicitly first (stable ABI)
+        abi3_suffix = ".abi3.so"
+        if sys.platform == "win32":
+            abi3_suffix = ".abi3.pyd"
+        abi3_exact = _LIB_DIR / f"ragfs_python{abi3_suffix}"
+        if abi3_exact.exists():
+            return str(abi3_exact)
+        # Glob fallback: keep stable/generic artifacts, but never load a
+        # CPython-version-specific binary whose tag differs from EXT_SUFFIX.
+        for pattern in ("ragfs_python.cpython-*", "ragfs_python.abi3.*", "ragfs_python.*"):
+            for match in sorted(glob.glob(str(_LIB_DIR / pattern))):
+                if _is_compatible_ragfs_extension(match, ext_suffix):
+                    return match
     except Exception:
         pass
     return None
