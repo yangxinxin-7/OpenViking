@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { Type } from "@sinclair/typebox";
 import { memoryOpenVikingConfigSchema } from "./config.js";
 import { registerSetupCli } from "./commands/setup.js";
@@ -1566,6 +1568,94 @@ const mergeFindResults = (results: FindResult[]): FindResult => {
     });
     api.on("after_compaction", async (_event: unknown, _ctx?: HookAgentContext) => {
       // Reserved hook registration for future post-compaction memory integration.
+    });
+
+    // --- Skill-context agent memory injection ---
+    // When the LLM reads a SKILL.md file, we prefetch relevant agent memories
+    // and embed them directly into the toolResult message (via tool_result_persist),
+    // so they persist in the raw message store without being re-queried each turn.
+    const skillAgentMemoryCache = new Map<string, string>();
+
+    function isSkillMdFilePath(filePath: unknown): boolean {
+      if (typeof filePath !== "string") return false;
+      const normalized = filePath.trim().replace(/\\/g, "/");
+      return normalized.endsWith("/SKILL.md") || normalized === "SKILL.md";
+    }
+
+    function resolveHomePath(fp: string): string {
+      return fp.startsWith("~/") ? `${homedir()}${fp.slice(1)}` : fp;
+    }
+
+    function extractSkillDescriptionFromContent(content: string): string {
+      const fmMatch = content.match(/^---[\r\n]+([\s\S]*?)[\r\n]+---/);
+      if (!fmMatch) return "";
+      const line = fmMatch[1].split(/\r?\n/).find((l) => /^description:\s/.test(l));
+      return line ? line.replace(/^description:\s*/, "").trim() : "";
+    }
+
+    api.on("before_tool_call", async (event: unknown, ctx?: HookAgentContext) => {
+      const e = event as { params?: Record<string, unknown>; toolCallId?: string };
+      const filePath = e.params?.path ?? e.params?.file_path;
+      if (!isSkillMdFilePath(filePath) || !e.toolCallId) return;
+      if (isBypassedSession(ctx)) return;
+      try {
+        const content = await readFile(resolveHomePath(String(filePath)), "utf-8");
+        const description = extractSkillDescriptionFromContent(content);
+        if (!description) return;
+        const agentId = resolveAgentId(ctx?.sessionId, ctx?.sessionKey);
+        api.logger.info(
+          `openviking: skill-memory prefetch agentId=${agentId} sessionId=${ctx?.sessionId ?? "(none)"} sessionKey=${ctx?.sessionKey ?? "(none)"}`,
+        );
+        const client = await getClient();
+        const result = await client.find(description, {
+          targetUri: "viking://agent/memories/experiences",
+          limit: cfg.recallLimit,
+          scoreThreshold: cfg.recallScoreThreshold,
+        }, agentId);
+        api.logger.info(
+          `openviking: skill-memory find result count=${result.memories?.length ?? 0} agentId=${agentId}`,
+        );
+        const memories = postProcessMemories(result.memories ?? [], {
+          limit: cfg.recallLimit,
+          scoreThreshold: cfg.recallScoreThreshold,
+        });
+        if (memories.length > 0) {
+          skillAgentMemoryCache.set(
+            e.toolCallId,
+            `\n\n<relevant-agent-memories>\nThe following agent memories may be relevant to this skill:\n${formatMemoryLines(memories)}\n</relevant-agent-memories>`,
+          );
+          verboseRoutingInfo(
+            `openviking: cached ${memories.length} agent memories for skill ${String(filePath)}`,
+          );
+        }
+      } catch (err) {
+        api.logger.warn(`openviking: skill agent memory prefetch failed: ${String(err)}`);
+      }
+    });
+
+    api.on("tool_result_persist", (event: unknown) => {
+      const e = event as { toolCallId?: string; message?: Record<string, unknown> };
+      const toolCallId = e.toolCallId;
+      if (!toolCallId) return;
+      const memoryText = skillAgentMemoryCache.get(toolCallId);
+      if (!memoryText) return;
+      skillAgentMemoryCache.delete(toolCallId);
+      const message = e.message;
+      if (!message) return;
+      const content = message.content;
+      if (Array.isArray(content) && content.length > 0) {
+        const first = content[0] as Record<string, unknown>;
+        if (first?.type === "text" && typeof first.text === "string") {
+          return {
+            message: {
+              ...message,
+              content: [{ ...first, text: first.text + memoryText }, ...content.slice(1)],
+            },
+          };
+        }
+      } else if (typeof content === "string") {
+        return { message: { ...message, content: content + memoryText } };
+      }
     });
 
     if (typeof api.registerContextEngine === "function") {
