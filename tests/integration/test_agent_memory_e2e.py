@@ -215,8 +215,8 @@ def agent_memory_config_check():
 @pytest.fixture()
 def local_test_env() -> Dict[str, object]:
     policy = AccountNamespacePolicy(
-        isolate_user_scope_by_agent=True,
-        isolate_agent_scope_by_user=True,
+        isolate_user_scope_by_agent=False,
+        isolate_agent_scope_by_user=False,
     )
     local_path = Path.cwd() / ".tmp_agent_memory_e2e" / uuid.uuid4().hex[:8]
     local_path.mkdir(parents=True, exist_ok=True)
@@ -260,8 +260,8 @@ class TestAgentMemoryE2E:
         - After Round 2: trajectory count grows; still exactly 1 experience file (EDIT path, not CREATE).
         """
         policy = AccountNamespacePolicy(
-            isolate_user_scope_by_agent=True,
-            isolate_agent_scope_by_user=True,
+            isolate_user_scope_by_agent=False,
+            isolate_agent_scope_by_user=False,
         )
         agent_space = to_agent_space(policy, "alice", "travelbot")
         trajectories_dir = f"viking://agent/{agent_space}/memories/trajectories"
