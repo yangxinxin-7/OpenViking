@@ -20,7 +20,7 @@ from openviking_cli.utils import get_logger
 logger = get_logger(__name__)
 
 
-TRAJECTORY_MEMORY_TYPE = "trajectory"
+TRAJECTORY_MEMORY_TYPE = "trajectories"
 
 
 class AgentTrajectoryContextProvider(SessionExtractContextProvider):

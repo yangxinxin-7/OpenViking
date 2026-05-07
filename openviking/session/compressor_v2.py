@@ -54,7 +54,7 @@ def _stamp_trajectory_names(operations) -> None:
     # New model: ResolvedOperations with upsert_operations list
     if hasattr(operations, "upsert_operations"):
         for op in operations.upsert_operations:
-            if getattr(op, "memory_type", None) == "trajectory":
+            if getattr(op, "memory_type", None) == "trajectories":
                 fields = getattr(op, "memory_fields", None)
                 if fields and isinstance(fields, dict):
                     name = fields.get("trajectory_name")

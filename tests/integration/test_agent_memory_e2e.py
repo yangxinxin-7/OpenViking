@@ -306,10 +306,10 @@ class TestAgentMemorySchemas:
         schemas = provider.get_memory_schemas(ctx=None)
         schema_types = [s.memory_type for s in schemas]
 
-        assert "trajectory" not in schema_types, (
-            "trajectory schema must not appear in user memory extraction"
+        assert "trajectories" not in schema_types, (
+            "trajectories schema must not appear in user memory extraction"
         )
-        assert "experience" not in schema_types, (
-            "experience schema must not appear in user memory extraction"
+        assert "experiences" not in schema_types, (
+            "experiences schema must not appear in user memory extraction"
         )
 

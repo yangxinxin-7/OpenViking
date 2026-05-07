@@ -28,7 +28,7 @@ from openviking_cli.utils import get_logger
 logger = get_logger(__name__)
 
 
-EXPERIENCE_MEMORY_TYPE = "experience"
+EXPERIENCE_MEMORY_TYPE = "experiences"
 SEARCH_TOP_K = 5
 SOURCE_TRAJ_TOP_K = 3   # only attach source_trajectories for the top-3 candidates
 MAX_SOURCE_TRAJS = 3    # max trajectories to load per experience

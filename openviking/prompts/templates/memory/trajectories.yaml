@@ -1,4 +1,4 @@
-memory_type: trajectory
+memory_type: trajectories
 description: |
   A record of agent execution in one business domain within a conversation.
 
