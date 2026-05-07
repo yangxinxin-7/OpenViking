@@ -177,26 +177,6 @@ The final output of the model must strictly follow the JSON Schema format shown 
         tool_call_messages = await self.context_provider.prefetch()
         messages.extend(tool_call_messages)
 
-        # Track prefetched files in _read_files to avoid unnecessary refetch.
-        # Prefer provider-declared prefetched_uris (used by agent memory's formatted
-        # single-message prefetch), and also keep compatibility with the older
-        # tool_call_name JSON message format from upstream/main.
-        for uri in getattr(self.context_provider, "prefetched_uris", []):
-            self._read_files.add(uri)
-
-        for msg in tool_call_messages:
-            if msg.get("role") == "user" and "tool_call_name" in msg.get("content", ""):
-                import json
-
-                try:
-                    content = json.loads(msg.get("content", "{}"))
-                    if content.get("tool_call_name") == "read":
-                        uri = content.get("args", {}).get("uri")
-                        if uri:
-                            self._read_files.add(uri)
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-
         while iteration < max_iterations:
             iteration += 1
             tracer.info(f"ReAct iteration {iteration}/{max_iterations}")
