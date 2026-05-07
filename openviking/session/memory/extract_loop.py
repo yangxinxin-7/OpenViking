@@ -197,7 +197,6 @@ The final output of the model must strictly follow the JSON Schema format shown 
                 except (json.JSONDecodeError, AttributeError):
                     pass
 
-
         while iteration < max_iterations:
             iteration += 1
             tracer.info(f"ReAct iteration {iteration}/{max_iterations}")

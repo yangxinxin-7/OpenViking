@@ -526,7 +526,7 @@ class SessionCompressorV2:
     ):
         """Run one ExtractLoop phase with its own lock scope, then apply operations.
 
-        Returns (written_uris: List[str], contexts: List[Context]) on success,
+        Returns (written_uris, edited_uris, contexts, inherited_traj_uris) on success,
         or None on failure (unless strict_extract_errors is True, in which case
         the exception is re-raised).
         """
@@ -649,9 +649,6 @@ class SessionCompressorV2:
 
             registry = provider._get_registry()
             updater = self._get_or_create_updater(registry, transaction_handle)
-            extract_context = ExtractContext(messages)
-            isolation_handler = MemoryIsolationHandler(ctx, extract_context)
-            isolation_handler.prepare_messages()
             result = await updater.apply_operations(
                 operations, ctx, extract_context=extract_context, isolation_handler=isolation_handler
             )
@@ -737,10 +734,6 @@ class SessionCompressorV2:
                     metadata["source_trajectories"] = uris
                     metadata["content"] = plain_content
                     new_raw = serialize_with_metadata(metadata)
-                    try:
-                        await viking_fs.rm(exp_uri, ctx=ctx)
-                    except Exception:
-                        pass
                     await viking_fs.write_file(exp_uri, new_raw, ctx=ctx)
                     tracer.info(
                         f"[source_traj] appended {len(normalized_traj_uris)} trajectories -> {exp_uri}"

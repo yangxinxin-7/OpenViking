@@ -868,9 +868,28 @@ class Session:
                                 else _noop_agent()
                             )
 
-                            extracted, agent_extracted = await asyncio.gather(
-                                user_task, agent_task, return_exceptions=False
+                            _results = await asyncio.gather(
+                                user_task, agent_task, return_exceptions=True
                             )
+                            extracted_result, agent_result = _results
+
+                            if isinstance(extracted_result, Exception):
+                                logger.error(
+                                    f"User memory extraction failed: {extracted_result}",
+                                    exc_info=extracted_result,
+                                )
+                                extracted = []
+                            else:
+                                extracted = extracted_result
+
+                            if isinstance(agent_result, Exception):
+                                logger.error(
+                                    f"Agent memory extraction failed: {agent_result}",
+                                    exc_info=agent_result,
+                                )
+                                agent_extracted = []
+                            else:
+                                agent_extracted = agent_result
 
                             logger.info(f"Extracted {len(extracted)} memories")
                             for ctx_item in extracted:

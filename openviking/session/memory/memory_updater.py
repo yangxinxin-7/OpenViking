@@ -419,8 +419,6 @@ class MemoryUpdater:
             tracer.error(f"Memory not found for delete: {uri}")
             # Idempotent - deleting non-existent file succeeds
 
-
-
     async def _vectorize_memories(
         self,
         result: MemoryUpdateResult,
