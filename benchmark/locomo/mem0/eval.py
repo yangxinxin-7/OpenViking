@@ -73,7 +73,7 @@ def _update_openclaw_mem0_user(sample_id: str) -> None:
     os.replace(tmp, str(OPENCLAW_CONFIG_PATH))
 
 
-def _restart_openclaw_gateway(base_url: str, sample_id: str, startup_timeout: int = 30) -> None:
+def _restart_openclaw_gateway(base_url: str, sample_id: str, startup_timeout: int = 60) -> None:
     """
     Kill the running openclaw gateway process and restart it.
     Waits until the gateway is ready to accept requests.

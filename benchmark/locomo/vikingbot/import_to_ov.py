@@ -623,7 +623,7 @@ async def run_import(args: argparse.Namespace) -> None:
 
                 # Skip already ingested sessions unless force-ingest is enabled
                 if not args.force_ingest and is_already_ingested(
-                    sample_id, session_key, ingest_record, success_keys
+                    display_id, session_key, ingest_record, success_keys
                 ):
                     print(
                         f"  [{label}] [SKIP] already imported (use --force-ingest to reprocess)",

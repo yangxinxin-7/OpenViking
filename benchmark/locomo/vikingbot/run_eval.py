@@ -203,6 +203,8 @@ def load_locomo_qa(
             )
         else:
             for q_idx, qa in enumerate(qa_items):
+                if str(qa.get("category")) == "5":
+                    continue
                 evidence_list = qa.get("evidence", [])
                 question_id = f"{sample_id}_qa{q_idx}"
                 qa_list.append(
