@@ -1,0 +1,118 @@
+memory_type: principles
+description: |
+  A single always-on experience document, maintained SkillOpt-style: it starts
+  from a hand-written seed describing how to work in the environment, and is
+  incrementally revised by an analyst (openviking.session.memory.consolidation)
+  that reads accumulated trajectory memories. Revisions only reach the injected
+  default.md after passing an external evaluation gate. The document is injected
+  into the agent context as always-on guidance; it is never extracted from a
+  single trajectory and never returned by memory search.
+
+# Not part of the per-trajectory extraction loop or the search scope: the
+# consolidation job is the only writer. Keep disabled so ExtractLoop and
+# list_search_uris skip this type.
+enabled: false
+
+directory: "viking://user/{{ user_space }}/memories/principles"
+filename_template: "default.md"
+operation_mode: "upsert"
+stage: "agent"
+
+fields:
+  - name: content
+    type: string
+    description: |
+      The experience document body (free-form markdown).
+    merge_op: replace
+
+# Consumed by openviking.session.memory.consolidation.PrinciplesConsolidator.
+# Two-stage proposal mirroring SkillOpt: per-minibatch analysts (failure and
+# success trajectories get separate prompts) collect suggestions, then one
+# merge call turns them into a single revised document.
+consolidation:
+  min_trajectories: 5
+  max_trajectories_per_proposal: 120
+  minibatch_size: 8
+  max_chars: 8000
+  max_chars_per_trajectory: 3000
+  max_edits: 4
+  analyze_failure_prompt: |
+    You analyze FAILED task trajectories for an autonomous agent, to improve the
+    operating experience document injected into its system prompt.
+
+    You receive the CURRENT DOCUMENT and a minibatch of trajectory memories from
+    FAILED tasks. Each record describes one operation: its trigger, procedure,
+    anti-patterns, and applicability boundaries.
+
+    Identify the most important COMMON failure patterns across the batch — not
+    individual edge cases — that the current document fails to prevent, and
+    suggest guidance changes that would prevent them.
+
+    Requirements for every suggestion:
+    - Grounded in failures actually visible in the batch (cite the recurring
+      anti-pattern), never in general "good practice" reasoning alone.
+    - Procedural: HOW to decide and act, never what a specific task's answer was.
+    - No concrete entities from any single task (identifiers, file names, sheet
+      names, amounts, dates). No evaluation/benchmark mechanics.
+    - It is a VALID and often CORRECT answer to suggest nothing — an empty list
+      beats a speculative suggestion.
+
+    Respond with strict JSON only:
+    {"suggestions": ["<one suggested guidance change, 1-3 sentences>"]}
+    Use {"suggestions": []} if the batch teaches nothing new worth encoding.
+  analyze_success_prompt: |
+    You analyze SUCCESSFUL task trajectories for an autonomous agent, to improve
+    the operating experience document injected into its system prompt.
+
+    You receive the CURRENT DOCUMENT and a minibatch of trajectory memories from
+    SUCCESSFUL tasks. Each record describes one operation: its trigger,
+    procedure, anti-patterns, and applicability boundaries.
+
+    Identify reliable techniques that are COMMON across the batch and worth
+    encoding — not something that merely happened to work once, and not
+    something the current document already covers.
+
+    Requirements for every suggestion:
+    - Grounded in techniques actually used across MULTIPLE trajectories in the
+      batch, never in general "good practice" reasoning alone.
+    - Procedural: HOW to decide and act, never what a specific task's answer was.
+    - No concrete entities from any single task (identifiers, file names, sheet
+      names, amounts, dates). No evaluation/benchmark mechanics.
+    - It is a VALID and often CORRECT answer to suggest nothing — an empty list
+      beats a speculative suggestion.
+
+    Respond with strict JSON only:
+    {"suggestions": ["<one suggested guidance change, 1-3 sentences>"]}
+    Use {"suggestions": []} if the batch teaches nothing new worth encoding.
+  merge_prompt: |
+    You maintain an agent's operating experience document — the always-on
+    guidance injected into its system prompt. Merge analyst suggestions into a
+    revision of the document. Your revision is a CANDIDATE that will be
+    validated on a held-out task set before being accepted; most revisions
+    historically fail validation, so prefer few, high-conviction changes.
+
+    You receive:
+    - CURRENT DOCUMENT: the experience document currently in force.
+    - PREVIOUSLY REJECTED CHANGES: change batches that already FAILED held-out
+      validation. Do not re-apply the same or similar changes, even if a
+      suggestion re-proposes them.
+    - SUGGESTIONS FROM TRAJECTORY ANALYSTS: numbered suggestions collected from
+      minibatches of recent task trajectories, tagged [failure] or [success] by
+      the kind of batch they came from.
+
+    How to merge:
+    - Deduplicate suggestions expressing the same idea; prefer the ones
+      supported by more analysts and the ones from failure batches.
+    - Apply at most {{ max_edits }} targeted changes (add, rewrite, or remove a
+      section or bullet). Preserve everything else verbatim, including the
+      document's structure and headings.
+    - Discard suggestions that are task-specific, speculative, or conflict with
+      guidance already validated in the document.
+    - Keep the whole document under {{ max_chars }} characters.
+    - It is a VALID and often CORRECT answer to change nothing — an empty edit
+      list beats a speculative one.
+
+    Respond with strict JSON only:
+    {"edits": ["<one-line summary of each change>"],
+     "document": "<the COMPLETE revised markdown document>"}
+    Use {"edits": []} if nothing is worth changing.

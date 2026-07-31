@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +26,9 @@ from openviking.session.train.domain import (
 )
 from openviking.session.train.utils import average_score, validate_rollouts_have_cases
 from openviking_cli.client.http import AsyncHTTPClient
+from openviking_cli.utils import get_logger
+
+logger = get_logger(__name__)
 
 _TRAINING_COMMIT_MEMORY_TYPES = ("cases", "trajectories", "experiences")
 _TRAINING_CASE_SPEC_PROTOCOL = "openviking.batch_train.case_spec.v1"
@@ -65,6 +69,16 @@ class SessionCommitPolicyTrainer:
     ) -> RolloutTrainingResult:
         rollout_list = list(rollouts)
         validate_rollouts_have_cases(rollout_list)
+        if os.environ.get("OPENVIKING_TRAIN_COMMIT_ONLY_PASSED") == "1":
+            total = len(rollout_list)
+            rollout_list = [
+                r for r in rollout_list if r.evaluation is not None and bool(r.evaluation.passed)
+            ]
+            logger.info(
+                "OPENVIKING_TRAIN_COMMIT_ONLY_PASSED=1: committing %s/%s passed rollouts",
+                len(rollout_list),
+                total,
+            )
         if analyses is not None and len(analyses) != len(rollout_list):
             raise ValueError(
                 "SessionCommitPolicyTrainer analyses length must match rollouts length when provided"
@@ -323,8 +337,18 @@ def _rollout_event_fields(
 
 
 def _training_commit_memory_policy() -> dict[str, Any]:
+    # OPENVIKING_TRAIN_COMMIT_MEMORY_TYPES lets an experiment restrict extraction
+    # (e.g. "trajectories" only) so commits are much faster — the semantic
+    # extraction queue is the training bottleneck, and skipping cases/experiences
+    # cuts the per-commit VLM work by ~2/3.
+    override = os.environ.get("OPENVIKING_TRAIN_COMMIT_MEMORY_TYPES")
+    memory_types = (
+        [t.strip() for t in override.split(",") if t.strip()]
+        if override
+        else list(_TRAINING_COMMIT_MEMORY_TYPES)
+    )
     return {
-        "memory_types": list(_TRAINING_COMMIT_MEMORY_TYPES),
+        "memory_types": memory_types,
         "working_memory": {"enabled": False},
     }
 

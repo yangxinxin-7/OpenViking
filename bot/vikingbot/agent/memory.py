@@ -662,6 +662,64 @@ class MemoryStore:
                 except Exception as e:
                     logger.warning(f"Error closing VikingClient: {e}")
 
+    async def get_viking_principles_context(
+        self,
+        workspace_id: str,
+        openviking_connection: dict[str, Any] | None = None,
+    ) -> str:
+        """Read the consolidated principles document for always-on injection.
+
+        Returns "" when disabled, absent, or the server is unreachable — the
+        caller must treat principles as strictly optional context.
+        """
+        import os
+
+        ov_cfg = load_config().ov_server
+        if not getattr(ov_cfg, "principles_enable", True):
+            return ""
+        max_chars = max(1, int(getattr(ov_cfg, "principles_max_chars", 4000)))
+
+        # Gate runners evaluate a CANDIDATE principles document by pointing this
+        # env var at a local file; the server-side default.md is left untouched
+        # so concurrent real traffic never sees unverified content.
+        override = os.getenv("VIKINGBOT_PRINCIPLES_OVERRIDE_FILE")
+        if override:
+            try:
+                content = Path(override).read_text(encoding="utf-8")
+            except Exception as exc:
+                logger.debug(f"principles override file unreadable: {exc}")
+                return ""
+            return self._strip_principles_document(content, max_chars)
+
+        client = None
+        try:
+            client = await VikingClient.create(
+                agent_id=workspace_id,
+                connection=openviking_connection,
+            )
+            uri = f"{client._memory_target_uri(None).rstrip('/')}/principles/default.md"
+            content = await client.read_content(uri, level="read")
+            return self._strip_principles_document(str(content or ""), max_chars)
+        except Exception as exc:
+            logger.debug(f"principles context unavailable: {exc}")
+            return ""
+        finally:
+            if client is not None:
+                await client.close()
+
+    @staticmethod
+    def _strip_principles_document(content: str, max_chars: int) -> str:
+        body = str(content or "").strip()
+        if not body:
+            return ""
+        # Strip the machine metadata comment; agents only need the rules.
+        body = re.sub(r"<!--\s*MEMORY_FIELDS.*?-->", "", body, flags=re.DOTALL).strip()
+        body = re.sub(r"<!--\s*support[^>]*-->", "", body).strip()
+        # The caller supplies its own section heading.
+        body = re.sub(r"^#\s*Operating Principles\s*\n+", "", body)
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+        return body[:max_chars]
+
     async def get_viking_experience_context(
         self,
         query: str,

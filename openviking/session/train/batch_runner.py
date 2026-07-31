@@ -367,7 +367,7 @@ async def run_batch_train_eval(config: BatchTrainEvalConfig) -> BatchTrainEvalRe
 
         train_loader = _case_loader(
             config,
-            split="train",
+            split=os.environ.get("OPENVIKING_TRAIN_SPLIT", "train"),
             sample_index=config.train_index,
         )
 

@@ -582,6 +582,12 @@ class OpenVikingConfig(BaseModel):
     # Total character budget for the injected experience block. Memories beyond this
     # budget are degraded to link-only (uri + score) instead of being dropped.
     exp_recall_max_chars: int = 10000
+    # Inject the consolidated principles document (memories/principles/default.md)
+    # into the system prompt as always-on guidance. Independent of per-turn memory
+    # retrieval: principles are static per-space content maintained by the
+    # OpenViking consolidation job.
+    principles_enable: bool = True
+    principles_max_chars: int = 8000
 
     @field_validator("api_key_type", mode="before")
     @classmethod

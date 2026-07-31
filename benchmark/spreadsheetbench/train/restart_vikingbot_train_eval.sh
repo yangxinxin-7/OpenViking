@@ -1,39 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Restart the OpenViking bot server and tau2 rollout service, wait until both
-# are healthy, then start tau2 vikingbot batch train/eval.
+# Restart the OpenViking bot server and SpreadsheetBench rollout service, wait
+# until both are healthy, then start SpreadsheetBench vikingbot batch train/eval.
 #
-# Default training args match the common vikingbot run:
-#   --commit-concurrency 200 --epochs 2 --trials 8 --train-trials 1 --skip-final-eval
-# Pass any non-launcher arguments to override/extend the batch train/eval invocation.
+# Mirrors benchmark/tau2/train/restart_vikingbot_train_eval.sh, including the
+# slot mechanism (isolated OpenViking config/data/ports per slot).
 #
 # Launcher-only options:
 #   --slot N   Run an isolated slot. Slot 0 is the default legacy setup. Slot N>0
 #              uses separate ports, OpenViking config/data, logs, and result dir.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TAU2_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-REPO_ROOT="$(cd "${TAU2_DIR}/../.." && pwd)"
+SSB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SSB_DIR}/../.." && pwd)"
 
-SLOT="${TAU2_TRAIN_SLOT:-0}"
+SLOT="${SSB_TRAIN_SLOT:-0}"
 declare -a TRAIN_CLI_ARGS=()
 
 usage() {
   cat <<'USAGE'
 Usage:
-  bash benchmark/tau2/train/restart_vikingbot_train_eval.sh [--slot N] [train/eval args...]
+  bash benchmark/spreadsheetbench/train/restart_vikingbot_train_eval.sh [--slot N] [train/eval args...]
 
 Launcher options:
   --slot N  Isolated experiment slot. Slot 0 is default/legacy. Slot N>0 uses:
             OV port     = 1933 + N
             OV bot port = 18790 + N
-            tau2 port   = 1944 + N
+            SSB port    = 1954 + N
             OV config   = ~/.openviking_N/ov.conf
             OV data     = ~/.openviking_N/data
-            result dir  = result/tau2/train_N
+            result dir  = result/spreadsheetbench/train_N
 
-All remaining args are passed to benchmark/tau2/train/run_batch_train_eval.sh.
+All remaining args are passed to benchmark/spreadsheetbench/train/run_batch_train_eval.sh.
 USAGE
 }
 
@@ -42,7 +41,7 @@ parse_launcher_args() {
     case "$1" in
       --slot)
         if [[ $# -lt 2 ]]; then
-          echo "[restart-vikingbot-train] ERROR: --slot requires a value" >&2
+          echo "[restart-ssb-train] ERROR: --slot requires a value" >&2
           exit 1
         fi
         SLOT="$2"
@@ -71,7 +70,7 @@ parse_launcher_args() {
 
 validate_slot() {
   if ! [[ "${SLOT}" =~ ^[0-9]+$ ]]; then
-    echo "[restart-vikingbot-train] ERROR: --slot must be a non-negative integer, got: ${SLOT}" >&2
+    echo "[restart-ssb-train] ERROR: --slot must be a non-negative integer, got: ${SLOT}" >&2
     exit 1
   fi
 }
@@ -82,18 +81,18 @@ validate_slot
 if [[ "${SLOT}" == "0" ]]; then
   DEFAULT_OPENVIKING_PORT="1933"
   DEFAULT_OPENVIKING_BOT_PORT="18790"
-  DEFAULT_TAU2_SERVICE_PORT="1944"
+  DEFAULT_SSB_SERVICE_PORT="1954"
   DEFAULT_RESULT_DIR_NAME="train"
-  DEFAULT_LOG_DIR="${REPO_ROOT}/result/tau2/train/service_logs"
+  DEFAULT_LOG_DIR="${REPO_ROOT}/result/spreadsheetbench/train/service_logs"
   DEFAULT_OPENVIKING_CONFIG_FILE="${HOME}/.openviking/ov.conf"
   DEFAULT_OPENVIKING_DATA_DIR="${HOME}/.openviking/data"
   DEFAULT_SLOT_ROOT="${HOME}/.openviking"
 else
   DEFAULT_OPENVIKING_PORT="$((1933 + SLOT))"
   DEFAULT_OPENVIKING_BOT_PORT="$((18790 + SLOT))"
-  DEFAULT_TAU2_SERVICE_PORT="$((1944 + SLOT))"
+  DEFAULT_SSB_SERVICE_PORT="$((1954 + SLOT))"
   DEFAULT_RESULT_DIR_NAME="train_${SLOT}"
-  DEFAULT_LOG_DIR="${REPO_ROOT}/result/tau2/${DEFAULT_RESULT_DIR_NAME}/service_logs"
+  DEFAULT_LOG_DIR="${REPO_ROOT}/result/spreadsheetbench/${DEFAULT_RESULT_DIR_NAME}/service_logs"
   DEFAULT_SLOT_ROOT="${HOME}/.openviking_${SLOT}"
   DEFAULT_OPENVIKING_CONFIG_FILE="${DEFAULT_SLOT_ROOT}/ov.conf"
   DEFAULT_OPENVIKING_DATA_DIR="${DEFAULT_SLOT_ROOT}/data"
@@ -101,11 +100,10 @@ fi
 
 OPENVIKING_PORT="${OPENVIKING_PORT:-${DEFAULT_OPENVIKING_PORT}}"
 OPENVIKING_BOT_PORT="${OPENVIKING_BOT_PORT:-${DEFAULT_OPENVIKING_BOT_PORT}}"
-TAU2_SERVICE_HOST="${TAU2_SERVICE_HOST:-127.0.0.1}"
-TAU2_SERVICE_PORT="${TAU2_SERVICE_PORT:-${DEFAULT_TAU2_SERVICE_PORT}}"
-TAU2_ROLLOUT_BACKEND="${TAU2_ROLLOUT_BACKEND:-vikingbot}"
-TAU2_MAX_ROLLOUT_CONCURRENCY="${TAU2_MAX_ROLLOUT_CONCURRENCY:-150}"
-TAU2_ROLLOUT_THREAD_WORKERS="${TAU2_ROLLOUT_THREAD_WORKERS:-${TAU2_MAX_ROLLOUT_CONCURRENCY}}"
+SSB_SERVICE_HOST="${SSB_SERVICE_HOST:-127.0.0.1}"
+SSB_SERVICE_PORT="${SSB_SERVICE_PORT:-${DEFAULT_SSB_SERVICE_PORT}}"
+SSB_MAX_ROLLOUT_CONCURRENCY="${SSB_MAX_ROLLOUT_CONCURRENCY:-100}"
+SSB_ROLLOUT_THREAD_WORKERS="${SSB_ROLLOUT_THREAD_WORKERS:-${SSB_MAX_ROLLOUT_CONCURRENCY}}"
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-180}"
 RESULT_DIR_NAME="${RESULT_DIR_NAME:-${DEFAULT_RESULT_DIR_NAME}}"
 LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_DIR}}"
@@ -114,16 +112,16 @@ OPENVIKING_DATA_DIR="${OPENVIKING_DATA_DIR:-${DEFAULT_OPENVIKING_DATA_DIR}}"
 SLOT_ROOT="${SLOT_ROOT:-${DEFAULT_SLOT_ROOT}}"
 
 OPENVIKING_LOG="${LOG_DIR}/openviking-server.log"
-TAU2_SERVICE_LOG="${LOG_DIR}/tau2-service.log"
+SSB_SERVICE_LOG="${LOG_DIR}/ssb-service.log"
 
 mkdir -p "${LOG_DIR}"
 
 log() {
-  printf '[restart-vikingbot-train] %s\n' "$*"
+  printf '[restart-ssb-train] %s\n' "$*"
 }
 
 fail() {
-  printf '[restart-vikingbot-train] ERROR: %s\n' "$*" >&2
+  printf '[restart-ssb-train] ERROR: %s\n' "$*" >&2
   exit 1
 }
 
@@ -238,9 +236,9 @@ if not isinstance(ov_server, dict):
     ov_server = {}
 bot["ov_server"] = ov_server
 ov_server["server_url"] = openviking_url
-# Tau2 VikingBot rollout uses experience memories; matching cases are only used
-# to follow deterministic case -> experience links. Diagnostic trajectories are
-# not injected into runtime recall.
+# SpreadsheetBench VikingBot rollout uses experience memories; matching cases are
+# only used to follow deterministic case -> experience links. Diagnostic
+# trajectories are not injected into runtime recall.
 ov_server["case_recall_limit"] = max(int(ov_server.get("case_recall_limit", 0) or 0), 3)
 ov_server["trajectory_recall_limit"] = 0
 ov_server["exp_recall_limit"] = max(int(ov_server.get("exp_recall_limit", 0) or 0), 6)
@@ -280,7 +278,7 @@ wait_for_http_json_ok() {
 
 start_openviking_server() {
   prepare_slot_config
-  log "slot=${SLOT} result_dir=result/tau2/${RESULT_DIR_NAME}"
+  log "slot=${SLOT} result_dir=result/spreadsheetbench/${RESULT_DIR_NAME}"
   log "slot root: ${SLOT_ROOT}"
   log "OpenViking config: ${OPENVIKING_CONFIG_FILE}"
   log "OpenViking data: ${OPENVIKING_DATA_DIR}"
@@ -311,53 +309,54 @@ start_openviking_server() {
     "${OPENVIKING_LOG}"
 }
 
-start_tau2_service() {
-  log "restarting tau2 service on ${TAU2_SERVICE_HOST}:${TAU2_SERVICE_PORT} backend=${TAU2_ROLLOUT_BACKEND}"
-  log "tau2 service concurrency=${TAU2_MAX_ROLLOUT_CONCURRENCY} rollout_thread_workers=${TAU2_ROLLOUT_THREAD_WORKERS}"
-  log "tau2 service log: ${TAU2_SERVICE_LOG}"
-  : > "${TAU2_SERVICE_LOG}"
-  stop_existing_listener "tau2 rollout service" "${TAU2_SERVICE_PORT}"
+start_ssb_service() {
+  log "restarting SpreadsheetBench service on ${SSB_SERVICE_HOST}:${SSB_SERVICE_PORT}"
+  log "ssb service concurrency=${SSB_MAX_ROLLOUT_CONCURRENCY} rollout_thread_workers=${SSB_ROLLOUT_THREAD_WORKERS}"
+  log "ssb service log: ${SSB_SERVICE_LOG}"
+  : > "${SSB_SERVICE_LOG}"
+  stop_existing_listener "ssb rollout service" "${SSB_SERVICE_PORT}"
 
   (
     cd "${REPO_ROOT}"
     export OPENVIKING_CONFIG_FILE
-    exec benchmark/tau2/train/run_service.sh \
-      --host "${TAU2_SERVICE_HOST}" \
-      --port "${TAU2_SERVICE_PORT}" \
+    export SSB_MAX_ROLLOUT_CONCURRENCY
+    export SSB_ROLLOUT_THREAD_WORKERS
+    exec benchmark/spreadsheetbench/train/run_service.sh \
+      --host "${SSB_SERVICE_HOST}" \
+      --port "${SSB_SERVICE_PORT}" \
       --config "${OPENVIKING_CONFIG_FILE}" \
-      --rollout-backend "${TAU2_ROLLOUT_BACKEND}" \
-      --max-rollout-concurrency "${TAU2_MAX_ROLLOUT_CONCURRENCY}" \
-      --rollout-thread-workers "${TAU2_ROLLOUT_THREAD_WORKERS}"
-  ) >"${TAU2_SERVICE_LOG}" 2>&1 &
+      --max-rollout-concurrency "${SSB_MAX_ROLLOUT_CONCURRENCY}" \
+      --rollout-thread-workers "${SSB_ROLLOUT_THREAD_WORKERS}"
+  ) >"${SSB_SERVICE_LOG}" 2>&1 &
 
-  echo "$!" > "${LOG_DIR}/tau2-service.pid"
-  log "tau2 service pid: $(cat "${LOG_DIR}/tau2-service.pid")"
+  echo "$!" > "${LOG_DIR}/ssb-service.pid"
+  log "ssb service pid: $(cat "${LOG_DIR}/ssb-service.pid")"
 
   wait_for_http_json_ok \
-    "tau2 rollout service" \
-    "http://${TAU2_SERVICE_HOST}:${TAU2_SERVICE_PORT}/health" \
+    "ssb rollout service" \
+    "http://${SSB_SERVICE_HOST}:${SSB_SERVICE_PORT}/health" \
     '"status":"ok"' \
-    "${TAU2_SERVICE_LOG}"
+    "${SSB_SERVICE_LOG}"
 }
 
 run_train_eval() {
   local -a train_args=("$@")
   if [[ ${#train_args[@]} -eq 0 ]]; then
     train_args=(
-      --commit-concurrency 200
-      --epochs 2
-      --trials 8
+      --commit-concurrency 100
+      --epochs 1
+      --trials 3
       --train-trials 1
       --skip-final-eval
     )
   fi
 
   export OPENVIKING_CONFIG_FILE
-  export BENCHMARK_SERVICE_URL="http://${TAU2_SERVICE_HOST}:${TAU2_SERVICE_PORT}"
+  export BENCHMARK_SERVICE_URL="http://${SSB_SERVICE_HOST}:${SSB_SERVICE_PORT}"
   log "starting batch train/eval with BENCHMARK_SERVICE_URL=${BENCHMARK_SERVICE_URL}"
-  log "command: benchmark/tau2/train/run_batch_train_eval.sh --config ${OPENVIKING_CONFIG_FILE} --server-url http://127.0.0.1:${OPENVIKING_PORT} --result-dir-name ${RESULT_DIR_NAME} ${train_args[*]}"
+  log "command: benchmark/spreadsheetbench/train/run_batch_train_eval.sh --config ${OPENVIKING_CONFIG_FILE} --server-url http://127.0.0.1:${OPENVIKING_PORT} --result-dir-name ${RESULT_DIR_NAME} ${train_args[*]}"
   cd "${REPO_ROOT}"
-  exec benchmark/tau2/train/run_batch_train_eval.sh \
+  exec benchmark/spreadsheetbench/train/run_batch_train_eval.sh \
     --config "${OPENVIKING_CONFIG_FILE}" \
     --server-url "http://127.0.0.1:${OPENVIKING_PORT}" \
     --result-dir-name "${RESULT_DIR_NAME}" \
@@ -366,7 +365,7 @@ run_train_eval() {
 
 main() {
   start_openviking_server
-  start_tau2_service
+  start_ssb_service
   run_train_eval "${TRAIN_CLI_ARGS[@]}"
 }
 

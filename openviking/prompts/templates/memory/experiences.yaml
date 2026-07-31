@@ -14,9 +14,13 @@ fields:
     type: string
     description: |
       Name the generalizable pattern, not the specific instance.
+      Name the SITUATION or DECISION the experience covers — never how the original
+      task ended. A reader who sees only the name must not be able to guess the
+      original outcome (succeeded, refused, abandoned, or handed off).
+      Good: "booking_duplicate_handling", "modification_eligibility_decision".
+      Bad: "modification_ineligible_abort" (encodes the outcome).
       Must be written in {{ language }}.
       {% if language == 'en' %}Use lowercase snake_case, max 5 words.{% else %}Use a concise noun phrase, max 15 characters.{% endif %}
-      Good: "booking_duplicate_handling", "pytest_asyncio_cancel_hang_fix", "重复预订处理".
     merge_op: immutable
 
   - name: content
@@ -25,24 +29,29 @@ fields:
       Structured experience extraction in EXACTLY this 3-section format. This output will be injected directly into an autonomous agent's system prompt, so it MUST be written as strict, executable machine instructions:
 
       ## Situation
-      <markdown bullets: Entry Conditions. Describe the generalized context, user intent, or overarching scenario that dictates when this entire rule block becomes relevant>
+      <markdown bullets: Entry Conditions. The generalized context, requester intent, or scenario that makes this experience relevant. MUST end with a "Not applicable when:" bullet listing concrete disqualifying facts — conditions under which this experience is the WRONG guide (e.g. an exemption that covers the case, an object state that permits/forbids the operation, or an alternative the requester has said they would accept).>
 
       ## Approach
-      <markdown bullets: Active Execution Logic (The "DOs"). The step-by-step optimized path to success. Use direct imperative commands and explicit IF/THEN/ELSE statements for conditional execution. Do NOT place negative constraints or failure warnings here.>
+      <markdown bullets: Active Execution Logic (the "DOs"). The step-by-step optimized path. Direct imperative commands and explicit IF/THEN/ELSE branches only.>
 
       ## Reflect
-      <markdown bullets: Hard Guardrails & Principles (The "DON'Ts"). Strict negative rules (e.g., "NEVER do Z"), boundary conditions, and failure-prevention heuristics to avoid past mistakes.>
+      <markdown bullets: Hard Guardrails (the "DON'Ts"). Strict negative rules, boundary conditions, and failure-prevention heuristics translated from past mistakes. Never place positive execution steps here, and never repeat Approach content.>
+
+      Throughout these rules, "requester" means whoever issued the request (a human user or a calling system), and "terminal action" means any step that refuses, abandons, or hands off the covered request, or ends the whole task.
 
       Rules:
-      - MUTUAL EXCLUSIVITY (NO REDUNDANCY): Strictly separate active steps from constraints to eliminate redundant information. 'Approach' is ONLY for actionable, positive execution steps to advance the task. 'Reflect' is ONLY for negative boundaries, limits, and "what not to do." Do not repeat the same concept across both sections.
-      - OPTIMIZED EXECUTION PATH: You MUST critically analyze the original trajectory and aggressively trim away conversational noise, redundant retry loops, false starts, and irrelevant setup actions. Outline only the essential, efficient path in 'Approach'.
-      - MACHINE READABILITY (IMPERATIVE VOICE): Address the future agent directly using commanding imperatives (e.g., "Ask the user for X", "Call tool Y").
-      - ABSTRACTION MANDATE: Strip away specific entities, IDs, user names, or raw text from the past trajectory. Use generalized abstract descriptions so the rule applies universally.
-      - FAILURE INTEGRATION: Translate past mistakes into strict negative constraints. These MUST be placed exclusively in the 'Reflect' section.
-      - EXECUTION-FIRST PRINCIPLE: 'Approach' steps MUST describe direct tool invocations only. Strip all "I will now do X" / "I have completed X" communication steps.
-      - CONDITIONAL BRANCH PRESERVATION: Capture full decision trees as explicit IF/THEN/ELSE branches. NEVER collapse divergent user-driven branches into a single terminal action.
-      - ATOMIC SCOPE: Each experience MUST cover exactly ONE user intent and its associated tool-invocation sequence. Multiple distinct user intents → SEPARATE experiences. A 'Situation' listing more than one user goal is a violation: split immediately. Hard limit: if 'Approach' would exceed 8 bullets, STOP and split.
-      - STRICT FORMATTING: Use exactly the 3 headings above in this order. Use concise markdown bullets (-) for every section. No numbered lists, no introductory sentences, no conversational filler, and no closing paragraphs. Token efficiency is critical.
+      - FORMAT & SCOPE: Use exactly the 3 headings above, concise markdown bullets (-) only, no numbered lists, no filler. One experience covers exactly ONE requester intent and its tool sequence — a Situation listing multiple goals, or an Approach exceeding 8 bullets, must be split into separate experiences. Keep DOs (Approach) and DON'Ts (Reflect) strictly separated, never duplicated.
+      - DISTILL THE PATH: Critically trim the original trajectory — drop conversational noise, retry loops, false starts. Approach records only the essential path, as direct tool invocations in imperative voice ("Call tool Y"); strip "I will now…" / "I have completed…" narration.
+      - GENERALIZE: Strip concrete entities (identifiers, names, dates, amounts, raw text) so the pattern applies universally. The experience teaches the procedure; every concrete value is resolved from the live task at application time.
+      - DECISIONS, NOT OUTCOMES: The experience teaches HOW to decide, never WHAT was decided last time. Every eligibility or policy decision in Approach MUST be written as "check <fact> via <tool>" followed by explicit IF/THEN/ELSE covering BOTH outcomes. Never collapse a decision into its historical result: an experience whose only path is a terminal action is INVALID — rewrite it as the verification procedure that decides between acting and stopping, or do not produce it at all.
+      - TERMINAL ACTIONS: When a verified fact means the operation cannot be done, the recorded next step is ALWAYS "explain why to the requester and ask how they want to proceed". A handoff/escalation step may appear ONLY guarded by "IF the requester explicitly asks for it" or "IF the governing policy explicitly requires it for this case" (cite the policy clause — never infer the mandate from the fact that the source trajectory did it). Approach MUST NOT proactively offer or suggest a terminal action the requester has not raised, and MUST NOT contain steps that end the whole task (done/terminate calls, farewells): the experience ends at the covered intent's outcome; whether the task is finished is the live agent's decision.
+      - SCOPE & WRITES: If the triggering request can apply to more than one object ("all …", "every …"), Approach MUST begin by enumerating ALL matching objects via tools and state that the procedure repeats for EACH. Every state-changing step MUST be one the triggering request itself asks for; side-effect writes specific to the original task may appear only as "IF the requester also requests <X>" branches.
+      - REFLECT GUARDRAILS: Reflect MUST include each guardrail below whenever its objective trigger condition holds — this is mandatory, not a judgment call; omitting a triggered guardrail makes the experience INVALID:
+        (a) ALWAYS: "Take every concrete value from the current conversation and current tool results, never from this experience."
+        (b) IF the request can cover multiple objects: "Re-derive the full list of matching objects from tool results and confirm the operation ran on EVERY one before treating this intent as complete."
+        (c) IF the experience serves requester-issued tasks: "This experience covers one intent only — before ending the whole task, re-check the conversation for other unresolved requests."
+        (d) IF the experience contains any refusal/ineligibility/cannot-proceed branch: "Verify the disqualifying fact via current tool results before refusing; if the check passes, perform the requested operation instead."
+        (e) IF the experience contains any refusal/ineligibility/cannot-proceed or handoff branch: "When the operation cannot be done, tell the requester why and ask how they want to proceed; never take a terminal action unless the requester asks or the governing policy explicitly requires it."
 
     merge_op: replace
 

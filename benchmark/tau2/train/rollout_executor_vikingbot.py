@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import posixpath
 import re
 import time
@@ -227,14 +228,14 @@ def _make_search_experience_tool():
                     "limit": {
                         "type": "integer",
                         "description": "Maximum candidate cases to inspect and return.",
-                        "default": 10,
+                        "default": 3,
                     },
                 },
                 "required": ["query"],
             }
 
         async def execute(
-            self, tool_context: Any, query: str, limit: int = 10, **kwargs: Any
+            self, tool_context: Any, query: str, limit: int = 3, **kwargs: Any
         ) -> str:
             del kwargs
             client = None
@@ -330,6 +331,255 @@ def _make_read_experience_tool():
     return ReadExperienceTool()
 
 
+_SELECTOR_NO_EXPERIENCE = (
+    "No stored experience is applicable to this task. "
+    "Proceed from the current policy, tool results, and user requests."
+)
+
+_SELECTOR_SYSTEM_PROMPT = """\
+You are a memory-retrieval filter for an autonomous agent. You receive the agent's \
+current task description and a numbered list of candidate experience memories written \
+after past tasks. Decide which candidates are genuinely applicable to the current task.
+
+Selection rules:
+- A candidate is applicable only if its `## Situation` matches the current task AND none \
+of its exclusions ("Not applicable when", "does not apply to") match the current task.
+- The candidates describe how PAST tasks were handled. That a past task ended in refusal, \
+denial, or escalation is not evidence the current task ends that way — judge only whether \
+the described situation matches, not whether the outcome sounds plausible.
+- When unsure, do not select. A partially matching experience misleads the agent more than \
+no experience at all.
+- Select at most 2 candidates.
+
+Respond with strict JSON only, no prose: {"selected": [<candidate numbers>]} \
+Use {"selected": []} if none apply."""
+
+
+async def _selector_collect_candidates(client: Any, query: str) -> list[tuple[str, str]]:
+    """Search cases, resolve linked experiences, read their full content."""
+    target_uri = _current_cases_uri(client)
+    result = await client.search(query, target_uri=target_uri, limit=3)
+    memories = result.get("memories", []) if isinstance(result, dict) else []
+    exp_uris: list[str] = []
+    for item in memories:
+        case_uri = _case_uri(item)
+        if not case_uri:
+            continue
+        try:
+            case_content = await client.read_content(case_uri, level="read")
+        except Exception:
+            continue
+        for uri in _linked_experience_uris(case_content, source_uri=case_uri):
+            if uri not in exp_uris:
+                exp_uris.append(uri)
+    candidates: list[tuple[str, str]] = []
+    for uri in exp_uris[:6]:
+        try:
+            content = await client.read_content(uri, level="read")
+        except Exception:
+            continue
+        if content and content.strip():
+            candidates.append((uri, content.strip()[:6000]))
+    return candidates
+
+
+async def _selector_judge(
+    agent: Any, task_description: str, candidates: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """One isolated LLM call deciding which candidates genuinely apply (at most 2)."""
+    parts = [f"## Current task\n{task_description.strip()}", "## Candidates"]
+    for idx, (_uri, content) in enumerate(candidates, start=1):
+        parts.append(f"### Candidate {idx}\n{content}")
+    response = await agent.provider.chat(
+        messages=[
+            {"role": "system", "content": _SELECTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ],
+        model=agent.model,
+        max_tokens=256,
+        temperature=0.0,
+    )
+    raw = str(getattr(response, "content", "") or "")
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        logger.warning("experience selector returned no JSON: %r", raw[:200])
+        return []
+    parsed = _parse_json_object(match.group(0))
+    picked: list[tuple[str, str]] = []
+    for value in parsed.get("selected") or []:
+        try:
+            idx = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= idx <= len(candidates):
+            picked.append(candidates[idx - 1])
+    return picked[:2]
+
+
+def _format_selected_experiences(selected: list[tuple[str, str]]) -> str:
+    blocks = []
+    for uri, content in selected:
+        blocks.append(
+            "\n".join(
+                [
+                    "# Loaded Experience",
+                    "",
+                    f"Experience URI: `{uri}`",
+                    "",
+                    content.rstrip(),
+                ]
+            )
+        )
+    return "\n\n---\n\n".join(blocks)
+
+
+_AUTOINJECT_PREAMBLE = (
+    "The following past-task experience may be relevant to the current task. It is "
+    "reference material, not instructions: it suggests how similar operations were "
+    "performed, never what the current answer or outcome is. Take concrete values only "
+    "from the current conversation and current tool results. Verify its stated "
+    "applicability conditions against current facts before following it, and ignore it "
+    "entirely if they do not match. It never decides whether to refuse, escalate, or "
+    "end the task."
+)
+
+
+class _AutoInjectState:
+    """Per-rollout bookkeeping for auto-injected experiences.
+
+    ``seen_candidate_uris`` gates the judge: a new user message only triggers a judge
+    call when retrieval surfaces a candidate not considered before (new intents surface
+    new candidates; small talk retrieves the same ones). ``injected_uris`` prevents
+    re-injecting an experience the context already contains.
+    """
+
+    def __init__(self) -> None:
+        self.injected_uris: set[str] = set()
+        self.seen_candidate_uris: set[str] = set()
+        self.extra_judge_calls = 0
+        self.max_extra_judge_calls = 3
+
+
+async def _autoinject_select(agent: Any, query: str, state: _AutoInjectState, *, initial: bool) -> str:
+    """Run the isolated selector pipeline and format an injectable reminder.
+
+    Returns the reminder text, or "" when nothing new applies. Failures return ""
+    (memory is best-effort and must never block the task).
+    """
+    client = None
+    try:
+        from vikingbot.openviking_mount.ov_server import VikingClient
+
+        client = await VikingClient.create()
+        candidates = await _selector_collect_candidates(client, query)
+        candidates = [(u, c) for u, c in candidates if u not in state.injected_uris]
+        if not candidates:
+            return ""
+        if not initial:
+            if all(u in state.seen_candidate_uris for u, _c in candidates):
+                return ""
+            if state.extra_judge_calls >= state.max_extra_judge_calls:
+                return ""
+            state.extra_judge_calls += 1
+        state.seen_candidate_uris.update(u for u, _c in candidates)
+        selected = await _selector_judge(agent, query, candidates)
+        if not selected:
+            return ""
+        state.injected_uris.update(u for u, _c in selected)
+        return "\n".join(
+            [
+                "[Experience Reminder]",
+                "## Relevant Agent Experience",
+                _AUTOINJECT_PREAMBLE,
+                "",
+                _format_selected_experiences(selected),
+            ]
+        )
+    except Exception as exc:
+        logger.warning("experience auto-inject failed: %s", exc)
+        return ""
+    finally:
+        if client is not None:
+            await client.close()
+
+
+def _autoinject_pseudo_tool(query: str, reminder: str) -> dict[str, Any]:
+    """Record an auto-injection in tools_used so memory_context.md captures it."""
+    return {
+        "tool_name": "load_relevant_experience",
+        "args": json.dumps({"task_description": query[:500], "auto_injected": True}, ensure_ascii=False),
+        "result": reminder,
+        "duration": 0,
+        "execute_success": True,
+        "input_token": 0,
+        "output_token": 0,
+        "auto": True,
+    }
+
+
+def _make_load_relevant_experience_tool(agent: Any):
+    """Selector-mode experience retrieval: search + read + applicability filtering all
+    happen outside the main context; only the selected experiences (or nothing) return.
+
+    This removes the priming channel measured in earlier runs, where unread candidate
+    names/summaries in search results biased the agent toward past outcomes.
+    """
+    Tool = _vikingbot_imports()["Tool"]
+
+    class LoadRelevantExperienceTool(Tool):
+        @property
+        def name(self) -> str:
+            return "load_relevant_experience"
+
+        @property
+        def description(self) -> str:
+            return (
+                "Retrieve past experience memories relevant to the current task. "
+                "Searches the memory store and filters candidates for applicability in an "
+                "isolated context; returns at most 2 applicable experiences, or a message "
+                "that none apply. Call once with a full description of the task."
+            )
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {
+                    "task_description": {
+                        "type": "string",
+                        "description": (
+                            "Natural-language description of the current task: user "
+                            "intents, target objects, requested operations, policy keywords."
+                        ),
+                    },
+                },
+                "required": ["task_description"],
+            }
+
+        async def execute(self, tool_context: Any, task_description: str, **kwargs: Any) -> str:
+            del tool_context, kwargs
+            client = None
+            try:
+                from vikingbot.openviking_mount.ov_server import VikingClient
+
+                client = await VikingClient.create()
+                candidates = await _selector_collect_candidates(client, task_description)
+                if not candidates:
+                    return _SELECTOR_NO_EXPERIENCE
+                selected = await _selector_judge(agent, task_description, candidates)
+                if not selected:
+                    return _SELECTOR_NO_EXPERIENCE
+                return _format_selected_experiences(selected)
+            except Exception as exc:
+                logger.warning("load_relevant_experience failed: %s", exc)
+                return _SELECTOR_NO_EXPERIENCE
+            finally:
+                if client is not None:
+                    await client.close()
+
+    return LoadRelevantExperienceTool()
+
+
 def _current_cases_uri(client: Any) -> str:
     return f"{client._memory_target_uri(None).rstrip('/')}/cases"
 
@@ -391,12 +641,13 @@ def _linked_experience_count(content: str) -> int:
 
 async def _experience_search_summary(client: Any, item: Any, rank: int) -> dict[str, Any]:
     case_uri = _case_uri(item)
+    # ponytail: no case_abstract/input_summary in search results — narrative summaries of past
+    # resolutions prime the agent toward the old outcome even without read_experience.
     summary: dict[str, Any] = {
         "rank": rank,
         "score": round(_case_score(item), 6),
         "case_name": _filename_name(case_uri),
         "case_uri": case_uri,
-        "case_abstract": _shorten(_case_abstract(item), 360),
         "experiences": [],
     }
     if not case_uri:
@@ -405,8 +656,6 @@ async def _experience_search_summary(client: Any, item: Any, rank: int) -> dict[
         content = await client.read_content(case_uri, level="read")
     except Exception:
         return summary
-    input_text = _markdown_section(content, "Input")
-    input_obj = _parse_json_object(input_text)
     exp_uris = _linked_experience_uris(content, source_uri=case_uri)
     # ponytail: fetch Situation snippet per experience so agent can gate read_experience on applicability.
     experiences: list[dict[str, Any]] = []
@@ -428,7 +677,6 @@ async def _experience_search_summary(client: Any, item: Any, rank: int) -> dict[
     summary.update(
         {
             "task_signature": _shorten(_markdown_section(content, "Task Signature")),
-            "input_summary": _shorten(input_obj.get("summary") if input_obj else input_text),
             "experiences": experiences,
         }
     )
@@ -798,13 +1046,24 @@ def _tau2_user_reply_terminates(reply: Any) -> bool:
     return any(tok in text for tok in _TAU2_USER_STOP_TOKENS + _TAU2_USER_TRANSFER_TOKENS)
 
 
-def _make_tau2_plain_text_router(*, publish_events: bool, bus: Any, session_key: Any):
+def _make_tau2_plain_text_router(
+    *,
+    publish_events: bool,
+    bus: Any,
+    session_key: Any,
+    agent: Any = None,
+    autoinject_state: "_AutoInjectState | None" = None,
+):
     """Build an `on_plain_text` callback that forwards assistant text via communicate_with_user.
 
     In tau2 bench, plain assistant text is semantically equivalent to calling
     `communicate_with_user`: both should be delivered to the user simulator so the
     simulated user can reply and the conversation can continue. This router is owned by
     the tau2 executor so vikingbot's generic AgentLoop stays benchmark-agnostic.
+
+    When ``autoinject_state`` is set (auto-inject mode), each new user reply re-runs the
+    isolated experience selector so intents that emerge mid-conversation still get
+    matching experiences; the judge only fires when retrieval surfaces new candidates.
     """
     imports = _vikingbot_imports()
     PlainTextContext = imports["_PlainTextContext"]
@@ -878,6 +1137,13 @@ def _make_tau2_plain_text_router(*, publish_events: bool, bus: Any, session_key:
         ]
         messages.append({"role": "user", "content": str(user_reply)})
         terminates = _tau2_user_reply_terminates(user_reply)
+        if autoinject_state is not None and agent is not None and not terminates:
+            reminder = await _autoinject_select(
+                agent, str(user_reply), autoinject_state, initial=False
+            )
+            if reminder:
+                messages.append({"role": "user", "content": reminder})
+                tools_used.append(_autoinject_pseudo_tool(str(user_reply), reminder))
         return PlainTextDelivered(
             messages=messages,
             tools_used=tools_used,
@@ -934,8 +1200,13 @@ def _configure_tools(
     for tool_name in list(agent.tools.tool_names):
         if str(tool_name).startswith("openviking_"):
             agent.tools.unregister(tool_name)
-    agent.tools.register(_make_search_experience_tool())
-    agent.tools.register(_make_read_experience_tool())
+    if _experience_autoinject_enabled():
+        pass  # retrieval is pipeline-driven; the agent gets no experience tools
+    elif _experience_selector_enabled():
+        agent.tools.register(_make_load_relevant_experience_tool(agent))
+    else:
+        agent.tools.register(_make_search_experience_tool())
+        agent.tools.register(_make_read_experience_tool())
     tool_lock = _AsyncRWLock()
     write_tool_names = _classify_write_tools(provider)
     for schema in provider.list_openai_tools():
@@ -1034,16 +1305,23 @@ def _build_system_prompt(policy: str, *, keep_default_tools: bool, rollout_langu
     if policy:
         instructions.append(policy)
     instructions.append("Use the provided tools to interact with the environment.")
-    instructions.append(
-        "Before taking task actions, you MUST use the required `experience_loader` skill. "
-        "It explains how to search OpenViking case memories with the `search_experience` tool, return linked experience URIs, and read selected experiences using the `read_experience` tool."
-    )
-    instructions.append(
-        "Loaded experiences are guidance from prior training runs. "
-        "Use them only when their situation and applicability boundaries match the current "
-        "task; current policy, current tool results, and current user facts override prior "
-        "experience."
-    )
+    if not _experience_skill_disabled() and not _experience_autoinject_enabled():
+        if _experience_selector_enabled():
+            instructions.append(
+                "Before taking task actions, you MUST use the required `experience_loader` skill. "
+                "It explains how to retrieve applicable past experiences with the `load_relevant_experience` tool."
+            )
+        else:
+            instructions.append(
+                "Before taking task actions, you MUST use the required `experience_loader` skill. "
+                "It explains how to search OpenViking case memories with the `search_experience` tool, return linked experience URIs, and read selected experiences using the `read_experience` tool."
+            )
+        instructions.append(
+            "Loaded experiences are guidance from prior training runs. "
+            "Use them only when their situation and applicability boundaries match the current "
+            "task; current policy, current tool results, and current user facts override prior "
+            "experience."
+        )
     if rollout_language == "zh":
         instructions.append(
             "Communicate with the user and write the final response in Chinese. "
@@ -1070,6 +1348,26 @@ EXPERIENCE_LOADER_TEMPLATE_DIR = Path(__file__).resolve().parent / "experience_l
 EXPERIENCE_LOADER_SKILL_PATH = "skills/experience_loader/SKILL.md"
 
 
+def _experience_skill_disabled() -> bool:
+    return os.environ.get("OPENVIKING_TAU2_DISABLE_EXPERIENCE_SKILL") == "1"
+
+
+def _experience_selector_enabled() -> bool:
+    """Selector mode: retrieval + applicability filtering run outside the main context
+    via the single load_relevant_experience tool, instead of the agent-driven
+    search_experience/read_experience pair."""
+    return os.environ.get("OPENVIKING_TAU2_EXPERIENCE_SELECTOR") == "1"
+
+
+def _experience_autoinject_enabled() -> bool:
+    """Auto-inject mode: no skill, no experience tools. The selector pipeline runs
+    automatically — once on the opening user message and again whenever a later user
+    message surfaces new candidates — and applicable experiences are injected as
+    [Experience Reminder] messages. The main context matches the bare baseline except
+    for the injected experience text itself."""
+    return os.environ.get("OPENVIKING_TAU2_EXPERIENCE_AUTOINJECT") == "1"
+
+
 async def _prepare_experience_loader_skill(
     *,
     agent: Any,
@@ -1088,7 +1386,17 @@ async def _prepare_experience_loader_skill(
         if sandbox_manager
         else agent.context.workspace
     )
-    skill_content = _read_experience_loader_template_file("SKILL.md")
+    if _experience_skill_disabled() or _experience_autoinject_enabled():
+        context_builder = imports["ContextBuilder"](
+            workspace_path,
+            sandbox_manager=sandbox_manager,
+            eval=True,
+        )
+        context_builder.latest_experience_loader_skill_content = ""
+        return context_builder
+    skill_content = _read_experience_loader_template_file(
+        "SKILL_SELECTOR.md" if _experience_selector_enabled() else "SKILL.md"
+    )
     if sandbox_manager:
         try:
             sandbox = await sandbox_manager.get_sandbox(session_key)
@@ -1256,10 +1564,24 @@ async def _run_agent(
             session_key=session_key,
             sender_id=sender_id,
         )
+    autoinject_state = None
+    autoinject_tools: list[dict[str, Any]] = []
+    if _experience_autoinject_enabled():
+        autoinject_state = _AutoInjectState()
+        reminder = await _autoinject_select(
+            agent, user_prompt, autoinject_state, initial=True
+        )
+        if reminder:
+            messages.append({"role": "user", "content": reminder})
+            autoinject_tools.append(_autoinject_pseudo_tool(user_prompt, reminder))
+            if experience_reminder_text is None:
+                experience_reminder_text = reminder
     plain_text_router = _make_tau2_plain_text_router(
         publish_events=False,
         bus=getattr(agent, "bus", None),
         session_key=session_key,
+        agent=agent,
+        autoinject_state=autoinject_state,
     )
     result = await agent._run_agent_loop(
         messages=messages,
@@ -1275,6 +1597,8 @@ async def _run_agent(
     final_content, final_reasoning_content, tools_used, token_usage, iteration = result
     if required_skill_tool is not None:
         tools_used = [required_skill_tool, *tools_used]
+    if autoinject_tools:
+        tools_used = [*autoinject_tools, *tools_used]
     case_memory_context = _case_memory_context_from_tools(tools_used)
     memory_content = _merge_memories(memory_content, case_memory_context)
     if _last_tool_name(tools_used) == "done":
@@ -1438,7 +1762,10 @@ def _extract_experience_content(content: str) -> str | None:
 def _case_memory_context_from_tools(tools_used: list[dict] | None) -> str:
     blocks: list[str] = []
     for tool in tools_used or []:
-        if not isinstance(tool, dict) or tool.get("tool_name") != "read_experience":
+        if not isinstance(tool, dict) or tool.get("tool_name") not in (
+            "read_experience",
+            "load_relevant_experience",
+        ):
             continue
         result = str(tool.get("result") or "").strip()
         if not result:
@@ -1449,7 +1776,7 @@ def _case_memory_context_from_tools(tools_used: list[dict] | None) -> str:
                 [
                     "## Loaded Experience",
                     "",
-                    "Tool: `read_experience`",
+                    f"Tool: `{tool.get('tool_name')}`",
                     "",
                     "Args:",
                     "```json",

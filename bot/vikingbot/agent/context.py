@@ -2,6 +2,7 @@
 
 import base64
 import mimetypes
+import os
 import platform
 import time as _time
 from datetime import datetime
@@ -196,6 +197,26 @@ Skills with available="false" need dependencies installed first - you can try in
                 )
                 if profiles:
                     parts.append(profiles)
+
+        # Consolidated operating principles: always-on guidance distilled from the
+        # experience library. Independent of ov_tools_enable — this is static
+        # per-space content, not per-turn retrieval; absent/unreachable is fine.
+        principles = await self.memory.get_viking_principles_context(
+            workspace_id=workspace_id,
+            openviking_connection=self._openviking_connection,
+        )
+        if principles:
+            if os.getenv("VIKINGBOT_PRINCIPLES_SKILLOPT_STYLE") == "1":
+                # SkillOpt-aligned presentation: the document is authoritative
+                # experience content, with no softening caveat.
+                parts.append("## Experience\n\n" + principles)
+            else:
+                parts.append(
+                    "# Operating Principles (learned from past tasks)\n\n"
+                    + principles
+                    + "\n\nThese principles are general guidance; the current task's "
+                    "instructions and tool results always take precedence."
+                )
 
         return "\n\n---\n\n".join(parts)
 

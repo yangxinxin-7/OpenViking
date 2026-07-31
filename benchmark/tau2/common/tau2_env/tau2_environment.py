@@ -236,10 +236,12 @@ class _GymTau2BenchEnv:
     def __init__(self, domain: str, task_id: str):
         _install_tau2_litellm_rate_limit_retry()
         _install_tau2_litellm_unknown_cost_suppression()
+        user_llm_args_env = os.getenv("TAU2_USER_LLM_ARGS")
         self.env = AgentGymEnv(
             domain=domain,
             task_id=task_id,
             user_llm=os.getenv("TAU2_USER_LLM") or DEFAULT_TAU2_USER_LLM,
+            user_llm_args=json.loads(user_llm_args_env) if user_llm_args_env else None,
         )
         self.terminated = False
 
